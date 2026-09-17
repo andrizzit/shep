@@ -1,6 +1,6 @@
 id = "shep"
 name = "Shep"
-version = "0.2.1"
+version = "0.2.2"
 min_herdr_version = "0.9.1"
 description = "Your agents, together. A live agent board for Herdr and localhost."
 platforms = ["macos", "linux"]

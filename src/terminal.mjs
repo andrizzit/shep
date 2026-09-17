@@ -15,16 +15,16 @@ const statusColors = { working: C.green, blocked: C.amber, done: C.blue, idle: C
 // A 9×8 pixel shepherd: upright ears, square eyes, a muzzle, and short paws.
 // Two square pixels share each terminal cell through the upper-half block.
 const shepherd = [
-  'TT.....TT',
-  'TTTTTTTTT',
-  'TT.TTT.TT',
-  'TT.TTT.TT',
-  '.TTT.TTT.',
-  '.TTTTTTT.',
-  '.TT...TT.',
-  '.TT...TT.',
+  'DD.....DD',
+  'DDDDWDDDD',
+  'DD.DWD.DD',
+  'DD.WWW.DD',
+  '.DWW.WWD.',
+  '.DDWWWDD.',
+  '.DD...DD.',
+  '.WW...WW.',
 ];
-const fur = { '.': C.canvas, T: C.orange };
+const fur = { '.': C.canvas, D: '#72767d', W: '#f2f1eb' };
 const segments = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // Host metadata is data, never terminal instructions (including OSC and newlines).
@@ -145,6 +145,11 @@ function drawShepherd(frame, x, y) {
     }
   }
 }
+function drawCompactShepherd(frame, x, y) {
+  frame.put(x,y,'▟▀',{fg:fur.D});
+  frame.put(x+2,y,'ᴥ',{fg:fur.W});
+  frame.put(x+3,y,'▀▙',{fg:fur.D});
+}
 function knownStatus(agent) { return Object.hasOwn(labels,agent.status)?agent.status:'unknown'; }
 function providerName(provider) { return names.get(provider)??provider; }
 function brandColor(provider) { return provider==='claude'?C.orange:provider==='kiro'?C.purple:C.green; }
@@ -186,7 +191,9 @@ export function boardLines(snapshot,{width=100,height=28,url='',offset=0,filter=
   height=Math.max(1,Math.min(Math.floor(height),160));
   const frame=new Frame(width,height);
   if (width<40||height<10) {
-    ['▟▀ᴥ▀▙ SHEP','Enlarge this pane to see the board.',`Browser: ${url}`,'q close · r refresh'].slice(0,height).forEach((line,row)=>frame.put(0,row,line));
+    ['','Enlarge this pane to see the board.',`Browser: ${url}`,'q close · r refresh'].slice(0,height).forEach((line,row)=>frame.put(0,row,line));
+    drawCompactShepherd(frame,0,0);
+    frame.put(6,0,'SHEP');
     return {lines:frame.plain(),styledLines:frame.ansi(),maxOffset:0,offset:0};
   }
   const agents=snapshot.agents??[];
@@ -207,7 +214,8 @@ export function boardLines(snapshot,{width=100,height=28,url='',offset=0,filter=
   const blocked=agents.filter(a=>a.status==='blocked').length;
   const brandX=left+(compact?0:12);
   if (!compact) drawShepherd(frame,left,1);
-  frame.put(brandX,tight?0:1,compact?'▟▀ᴥ▀▙ shep.':'shep.',{fg:C.orange,bold:true});
+  if (compact) drawCompactShepherd(frame,left,tight?0:1);
+  frame.put(brandX+(compact?6:0),tight?0:1,'shep.',{fg:C.orange,bold:true});
   frame.put(left+boardWidth-displayWidth(`● ${health}`),tight?0:1,`● ${health}`,{fg:healthColor,bold:true});
   let bodyStart;
   const activeFilter=filterNames[Math.max(0,filters.indexOf(filter))];
