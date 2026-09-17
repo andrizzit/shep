@@ -1,0 +1,12 @@
+id = "shep"
+name = "Shep"
+version = "0.2.1"
+min_herdr_version = "0.9.1"
+description = "Your agents, together. A live agent board for Herdr and localhost."
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "board"
+title = "🐕 Shep"
+placement = "split"
+command = ["node", "bin/shep.mjs"]

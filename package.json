@@ -1,0 +1,27 @@
+{
+  "name": "shep-herdr-plugin",
+  "version": "0.2.1",
+  "private": true,
+  "description": "One place to watch your Herdr agents.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrizzit/shep.git"
+  },
+  "homepage": "https://github.com/andrizzit/shep#readme",
+  "bugs": { "url": "https://github.com/andrizzit/shep/issues" },
+  "type": "module",
+  "bin": {
+    "shep": "bin/shep.mjs",
+    "shep-run": "bin/shep.mjs"
+  },
+  "files": ["bin/", "src/", "public/", "herdr-plugin.toml", "tests/fixtures/demo-snapshot.json"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node bin/shep.mjs",
+    "dev": "node bin/shep.mjs",
+    "demo": "node bin/shep.mjs --demo --web --port 4318",
+    "terminal": "node bin/shep.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs"
+  }
+}

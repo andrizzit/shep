@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f7f2">
+    <meta name="description" content="A clear, local view of the coding agents in your Herdr session.">
+    <title>Shep — Your agents, together</title>
+    <link rel="icon" href="/favicon.svg?v=dog" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#agent-board">Skip to agents</a>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Shep home">
+          <img src="/favicon.svg?v=dog" width="38" height="38" alt="">
+          <span>shep<span class="brand-period">.</span></span>
+        </a>
+        <div class="topbar-right">
+          <span class="local-label"><span class="local-icon" aria-hidden="true">⌁</span> Local monitor</span>
+          <span id="connection-badge" class="connection-badge" data-state="connecting"><span class="connection-dot" aria-hidden="true"></span><span id="connection-text">Connecting</span></span>
+        </div>
+      </header>
+
+      <main>
+        <section class="intro" aria-labelledby="page-heading">
+          <div>
+            <div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> A home for your herd</div>
+            <h1 id="page-heading">Your agents, together.</h1>
+            <p class="intro-copy">One place to see who’s working, who’s waiting, and where.</p>
+          </div>
+          <div class="scope-label"><span class="scope-icon" aria-hidden="true">⌘</span><div><span id="source-name">Herdr session</span><span id="source-scope">Current Herdr session</span></div></div>
+        </section>
+
+        <div id="mode-banner" class="mode-banner" hidden><span class="demo-tag">DEMO</span><span>Sample agents for exploring Shep. This page is not showing your live sessions.</span></div>
+        <div id="notice" class="notice" data-kind="connecting" role="status" aria-live="polite">
+          <div><strong id="notice-title">Connecting to your agents…</strong><span id="notice-message">Getting the latest snapshot from Herdr.</span></div>
+          <button id="retry-button" class="retry-button" type="button" hidden>Retry connection <span aria-hidden="true">↻</span></button>
+        </div>
+
+        <section class="summary-grid" aria-label="Session summary">
+          <div class="summary-cell"><span class="summary-label">Total agents <span class="summary-symbol" aria-hidden="true">↗</span></span><div class="summary-bottom"><span class="summary-value" id="total-count">—</span><span class="summary-note">across your session</span></div></div>
+          <div class="summary-cell"><span class="summary-label"><span class="status-dot" data-status="working" aria-hidden="true"></span> Working</span><div class="summary-bottom"><span class="summary-value" id="working-count">—</span><span class="summary-note">making progress</span></div></div>
+          <div class="summary-cell"><span class="summary-label"><span class="status-dot" data-status="blocked" aria-hidden="true"></span> Needs input</span><div class="summary-bottom"><span class="summary-value" id="blocked-count">—</span><span class="summary-note">ready for you</span></div></div>
+          <div class="summary-cell"><span class="summary-label">Workspaces <span class="summary-symbol" aria-hidden="true">▱</span></span><div class="summary-bottom"><span class="summary-value" id="workspace-count">—</span><span class="summary-note">in the mix</span></div></div>
+        </section>
+
+        <section class="agents-section" aria-labelledby="agents-heading">
+          <div class="section-heading"><div><h2 id="agents-heading">Agent overview</h2><span id="visible-count" class="visible-count">Waiting for a snapshot</span></div><span class="read-only-label">Read-only · auto-updating</span></div>
+          <div class="toolbar">
+            <div class="filter-tabs" role="group" aria-label="Filter by status">
+              <button class="filter-tab is-active" type="button" data-filter="all" aria-pressed="true">All agents <span id="filter-all-count" class="tab-count">—</span></button>
+              <button class="filter-tab" type="button" data-filter="working" aria-pressed="false">Working</button>
+              <button class="filter-tab" type="button" data-filter="blocked" aria-pressed="false">Needs input</button>
+              <button class="filter-tab" type="button" data-filter="done" aria-pressed="false">Done</button>
+              <button class="filter-tab" type="button" data-filter="idle" aria-pressed="false">Idle</button>
+              <button class="filter-tab" type="button" data-filter="unknown" aria-pressed="false">Unknown</button>
+            </div>
+            <label class="search-field"><svg viewBox="0 0 20 20" width="18" height="18" fill="none" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.5"/><path d="m13 13 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="sr-only">Search agents or workspaces</span><input id="search-input" type="search" placeholder="Search agents or workspaces" autocomplete="off" spellcheck="false"></label>
+          </div>
+
+          <div id="empty-state" class="empty-state" hidden><div class="empty-illustration" aria-hidden="true">⌁</div><h3 id="empty-title">No agents found yet</h3><p id="empty-message">Run a coding agent inside Herdr and it will appear here.</p><button id="clear-filters" class="clear-button" type="button" hidden>Clear filters</button></div>
+          <div id="agent-board" class="agent-board" tabindex="-1" aria-label="Agents by provider"></div>
+        </section>
+      </main>
+
+      <footer class="footer"><span><span class="footer-mark" aria-hidden="true">↳</span> A quieter view of the work in motion.</span><span id="updated-label">Waiting for Herdr <span aria-hidden="true">·</span> Refreshes every 2s</span></footer>
+    </div>
+    <noscript><p class="noscript-message">Shep needs JavaScript to display and refresh your Herdr agents.</p></noscript>
+  </body>
+</html>

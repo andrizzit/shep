@@ -1,0 +1,29 @@
+node_modules/
+.DS_Store
+coverage/
+*.log
+.shep/
+*.tgz
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.npmrc
+
+# Local planning, agent instructions, and app-creation records
+/PROJECT.md
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.codex/
+/.claude/
+/docs/PRODUCT.md
+/docs/CONTRACT.md
+/docs/STATUS.md
+/docs/QA.md
+/docs/TERMINAL-REVIEW.md
+/docs/LAUNCHER-REVIEW.md
+/docs/PUBLISH-REVIEW.md
