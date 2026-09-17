@@ -2,6 +2,7 @@
   "name": "shep-herdr-plugin",
   "version": "0.2.2",
   "private": true,
+  "license": "MIT",
   "description": "One place to watch your Herdr agents.",
   "repository": {
     "type": "git",

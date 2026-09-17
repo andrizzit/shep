@@ -233,3 +233,7 @@ The browser runner starts and stops its own controlled test server. Set `SHEP_LI
 - [Socket API](https://herdr.dev/docs/socket-api/)
 - [Agent detection](https://herdr.dev/docs/agents/)
 - [CLI reference](https://herdr.dev/docs/cli-reference/)
+
+## License
+
+Shep is available under the [MIT License](LICENSE). You can use, modify, and redistribute it, including commercially, under that license's terms.
