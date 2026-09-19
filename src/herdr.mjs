@@ -81,6 +81,11 @@ export function normalizeSnapshot(raw, now = new Date().toISOString()) {
       paneId,
       tabId: clean(agent.tab_id),
       terminalId,
+      agentName: clean(agent.name) ?? clean(agent.agent_name),
+      sessionId: agent.agent_session?.kind === 'id' ? clean(agent.agent_session.value) : null,
+      focused: agent.focused === true,
+      interactiveReady: agent.interactive_ready === true,
+      launchPending: agent.launch_pending === true,
       lastSeenAt: timestamp,
     };
   });

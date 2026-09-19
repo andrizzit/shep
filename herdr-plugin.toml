@@ -1,8 +1,8 @@
 id = "shep"
 name = "Shep"
-version = "0.2.2"
+version = "0.3.0"
 min_herdr_version = "0.9.1"
-description = "Your agents, together. A live agent board for Herdr and localhost."
+description = "Dispatch, focus, and manage your Herdr agents from one terminal."
 platforms = ["macos", "linux"]
 
 [[panes]]

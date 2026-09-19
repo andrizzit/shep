@@ -5,7 +5,7 @@
 <h1 align="center">Shep</h1>
 <p align="center"><strong>Your agents, together.</strong></p>
 
-Shep is a local dashboard for the coding agents you run inside [Herdr](https://herdr.dev/). Type `shep` in a Herdr pane to see Claude, Codex, Kiro, and other agent types in one place, grouped by name, with their status, workspace, and working directory.
+Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, choose Claude, Codex, Grok, or another supported tool, enter a prompt, and launch it in a native Herdr pane. Keep a grouped overview of every agent’s status, workspace, and working directory, then focus or close agents from the same interface.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show the same data from your current Herdr instance.
 
@@ -15,15 +15,17 @@ Keep it beside your chat in a terminal pane, or open its browser companion at **
 
 ## What Shep does
 
-- Groups agents by provider, including Claude, Codex, Kiro, and additional types reported by Herdr.
+- Dispatches your prompt to a selected installed agent, in an existing Herdr workspace and directory.
+- Groups agents by provider, including Claude, Codex, Grok, Kiro, and additional types reported by Herdr.
+- Lets you select agents with arrow keys or a mouse, focus their real panes, and confirm closing them.
 - Shows which agents are working, waiting for input, done, idle, or unknown.
 - Displays each agent's workspace and working directory across the current Herdr session.
-- Supports search, status filters, and keyboard navigation in the terminal and browser.
+- Supports search and keyboard navigation in the terminal, plus search and status filters in the browser companion.
 - Brings a small pixel-art shepherd dog to the terminal header, with a compact mark in narrow panes.
 - Refreshes about every two seconds and marks retained data as stale if the connection drops.
-- Runs locally with no runtime npm dependencies, API keys, accounts, or cloud services of its own.
+- Runs locally without a model account or cloud service of its own. Each agent uses its existing installation and authentication.
 
-Shep is a read-only monitor. It does not send prompts, stop agents, or read conversation transcripts. Herdr supplies the agent list and status; Shep does not infer activity by scanning operating-system processes.
+Shep is a coordinator, not another AI model. It sends the prompt you write to the tool you select, while Herdr owns the agent process and status. It does not automatically approve trust dialogs or questions, rewrite prompts, or replay an uncertain submission. The browser companion stays read-only.
 
 ## Requirements
 
@@ -50,13 +52,14 @@ cd shep
 ### 2. Build and install the local package
 
 ```sh
+npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.2.2.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.3.0.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
 
-The installation is local and needs no dependency downloads. It installs a copy, so you can run Shep without keeping the source checkout in its original location. No npm registry release is published; use the package built from this repository.
+`npm ci` downloads the locked Ink/React dependencies when building from source. `npm pack` bundles the runtime dependencies, so installing the resulting tarball works offline. The installed app is a copy: it does not depend on the source checkout remaining in its original location. No npm registry release is published; use the package built from this repository.
 
 ### 3. Make the commands available
 
@@ -82,57 +85,76 @@ shep
 
 `shep-run` is an equivalent command. Shep stays in the pane where you launch it, so run it in the pane on the right of your chat for a side-by-side view. It automatically connects to **that pane's current Herdr instance** and shows agents across all its workspaces.
 
-While Shep is running, open [localhost:4317](http://localhost:4317) for the browser dashboard. Quitting Shep also stops that browser server.
+Type a command in Shep and press **Enter**:
 
-- **Close:** press `q` outside search, or press `Ctrl+C` at any time.
+```text
+/dispatch codex: add voice input to shep
+/dispatch claude: review the authentication flow
+/dispatch grok: investigate this bug
+```
+
+The `provider:` prefix is optional. `/dispatch add voice input to shep` always uses **Codex**, even after a command sent to Claude or Grok. No flags are needed. An unknown or unavailable provider produces an error; Shep never silently substitutes another tool. Your workspace and directory choices apply to subsequent commands during the current run.
+
+Press **n** for optional launch settings: provider, unique name, existing workspace, working directory, and a multiline prompt. Use **Tab** to move between fields. Authentication and trust questions appear in the newly created agent pane; Shep keeps that pane available and reports when attention is needed.
+
+Use **↑/↓** to select an agent and **Enter** to focus its actual Herdr pane. Mouse clicks select agents; the Focus and Close buttons act on that selection. **x** opens a close confirmation. Closing an agent ends that pane’s process; it is separate from quitting Shep, which leaves all agents running.
+
+While Shep is running, open [localhost:4317](http://localhost:4317) for the read-only browser dashboard. Quitting Shep also stops that browser server.
+
+- **Close:** press `q` outside editors, or press `Ctrl+C` at any time.
 - **Reopen:** run `shep` again in the pane.
 - **Agents:** continue running when Shep closes.
 
 ![Shep terminal board with sample agents](docs/images/shep-terminal.png)
 
-*Terminal preview rendered from Shep's ANSI output with sample data. Colors and emoji appearance depend on your terminal.*
+*Terminal preview rendered by the actual Ink components with sample data. Colors and glyph appearance depend on your terminal.*
 
 ### Command options
 
 | Command | Behavior |
 | --- | --- |
-| `shep` | Terminal board and browser companion |
+| `shep` | Interactive Ink orchestrator and read-only browser companion |
 | `shep-run` | Alias for `shep` |
 | `shep --web` | Browser companion only; keep this process running in Herdr |
 | `shep --port 4319` | Use a different localhost port |
-| `shep --demo --port 4318` | Show clearly labeled sample agents inside Herdr |
+| `shep --demo --port 4318` | Show sample agents with dispatch/focus/close disabled |
 | `shep --help` | Show command help |
 | `shep --version` | Show the installed version |
 
-`SHEP_PORT` sets the default port; `--port` overrides it. `NO_COLOR=1 shep` disables terminal colors. `--terminal` explicitly selects the default terminal view.
+`SHEP_PORT` sets the default port; `--port` overrides it. `NO_COLOR=1 shep` disables terminal colors. `--terminal` explicitly selects the default terminal view. Redirected/noninteractive output uses a plain read-only board; orchestration requires an interactive terminal.
 
 ### Terminal controls
 
 | Key | Action |
 | --- | --- |
-| `/` | Search agent names and workspaces |
-| `Enter` | Keep the search and leave the search editor |
-| `Esc` | Clear the search and leave editing; outside editing, also reset the status filter |
+| `↑` / `↓` or `k` / `j` | Select an agent |
+| `Enter` | Focus the selected agent’s actual Herdr pane |
+| `/` | Enter `/dispatch [provider:] your task`; press Enter to launch |
+| `n` | Open optional launch settings and multiline composer |
+| `Tab` / `Shift+Tab` | Move between composer fields |
+| `←` / `→` | Change provider or workspace selection |
+| `Ctrl+S` | Submit the composer |
+| `s` | Search agents and workspaces |
 | `f` | Cycle status filters |
-| `1`–`6` | Select All, Working, Needs input, Done, Idle, or Unknown |
-| `↑` / `↓` or `k` / `j` | Scroll |
-| `Page Up` / `Page Down` / `Space` | Scroll up or down by ten rows |
-| `Home` / `End` | Jump to the top or bottom |
-| `r` | Refresh immediately |
-| `q` | Quit outside search editing |
-| `Ctrl+C` | Quit, including while editing a search |
+| `x` | Confirm closing the selected agent |
+| `Esc` | Cancel or leave the current editor/dialog |
+| `r` | Refresh the overview |
+| `q` | Quit outside editors |
+| `Ctrl+C` | Quit Shep; leave agents running |
+
+Pasted multiline prompts remain prompt text rather than keyboard shortcuts. Mouse support uses the terminal’s SGR mouse protocol; keyboard controls are always available. When focus moves to an agent, use Herdr’s pane navigation to return to Shep.
 
 ## What the statuses mean
 
-| Status | Meaning |
-| --- | --- |
-| Working | Herdr reports active work |
-| Needs input | Herdr reports `blocked`, such as an input or permission prompt |
-| Done | Herdr reports completion not yet marked seen |
-| Idle | Herdr reports an idle agent |
-| Unknown | Herdr cannot determine the status, or returns an unfamiliar value |
+| Status | Terminal color | Meaning |
+| --- | --- | --- |
+| Working | Yellow | Herdr reports active work |
+| Needs input | Red | Herdr reports `blocked`, such as an input or permission prompt |
+| Done | Teal | Herdr reports completion not yet marked seen |
+| Idle | Green | Herdr reports an idle agent |
+| Unknown | Gray | Herdr cannot determine the status, or returns an unfamiliar value |
 
-Status accuracy follows Herdr's detectors. Shep does not mark completed work as seen. If Herdr becomes unavailable after a successful connection, the last snapshot stays visible with a stale warning. A successful empty snapshot clears agents that are no longer present.
+Status accuracy follows Herdr's detectors. Reading the overview does not mark completed work as seen. Explicitly focusing an agent through Herdr marks it seen, so Done can become Idle. If Herdr becomes unavailable after a successful connection, the last snapshot stays visible with a stale warning. A successful empty snapshot clears agents that are no longer present.
 
 The scope is **one current Herdr instance**. Agents in other instances, other terminal applications, remote machines, or internal subagents that Herdr does not expose are not shown. Startup requires the host-provided socket and pane context; there is no manual session selector. `--session` is rejected and `SHEP_SESSION` is ignored.
 
@@ -165,9 +187,15 @@ The plugin shortcut is optional. Typing `shep` in an existing pane is enough to 
 | Connection interrupted / stale data | Check that Herdr is running, then press `r` or use the browser's Retry button. Polling retries automatically. |
 | Browser stops responding after quitting | The browser server belongs to the Shep process. Run `shep` again to reopen it. |
 
+## Dispatch and close behavior
+
+Agent availability means the command is installed, not that it is authenticated or ready. Shep starts tools through Herdr’s supported agent interface. If startup or prompt delivery times out, the created pane is preserved and the result explains what is known; Shep never retries a prompt automatically. Focus the pane to inspect a login, trust prompt, question, or uncertain submission before sending anything again.
+
+Controls are disabled when the view is stale/disconnected or showing demo data. Every mutation also refreshes the current session and target identity. Closing requires confirmation and rejects a changed target/status, including an agent that started working after you opened the dialog. Shep protects its own pane. Herdr 0.9.1 does not provide an atomic identity-conditional close, so a small interval remains between the final identity check and the close request.
+
 ## Local data and privacy
 
-Shep reads agent identity, status, pane/workspace metadata, and working directories through `herdr api snapshot`. It keeps snapshots in memory and does not store them on disk. It does not collect credentials or transmit data to a hosted service.
+Shep reads agent identity, status, pane/workspace metadata, and working directories through `herdr api snapshot`. It keeps snapshots and prompt drafts in memory and does not save them on disk. It does not collect credentials or transmit data to a hosted service of its own. On dispatch, your selected agent receives the prompt and applies its own data and provider settings.
 
 The browser server binds to `127.0.0.1` and serves only the dashboard assets and the snapshot endpoint. Other local processes and users with access to your machine may be able to read this dashboard. Host/Origin checks restrict browser requests; the Herdr environment check is host integration, not authentication against deliberately forged environment variables.
 
@@ -191,19 +219,20 @@ Your agents, Herdr sessions, and source checkout remain intact.
 
 ## Development
 
-There are no runtime dependencies to install and no build step:
+Install the locked development/runtime dependencies, then run the checks. There is no transpilation build step:
 
 ```sh
+npm ci --ignore-scripts
 npm run check
 npm test
 ```
 
-The tests use Node's built-in test runner, controlled Herdr fixtures, and temporary localhost servers. They cover snapshot normalization, current-instance validation, package installation, terminal controls, stale recovery, and HTTP boundaries. Tests do not need a running Herdr session.
+The tests use Node's built-in test runner, controlled Herdr fixtures, temporary localhost servers, and Python 3 for installed-package terminal checks. They cover literal prompt delivery, provider routing, keyboard/mouse controls, close confirmation, current-instance validation, uncertain outcomes, shutdown, package installation, stale recovery, and HTTP boundaries. Tests do not need a running Herdr session.
 
 To run from source inside Herdr:
 
 ```sh
-npm start         # Terminal board and browser companion
+npm start         # Ink orchestrator and browser companion
 npm run demo     # Browser demo at localhost:4318
 ```
 
@@ -220,7 +249,7 @@ The browser runner starts and stops its own controlled test server. Set `SHEP_LI
 | Location | Purpose |
 | --- | --- |
 | `bin/` | Installed command entrypoint |
-| `src/` | CLI, Herdr adapter, polling, terminal UI, and HTTP server |
+| `src/` | Ink components, native agent controls, CLI, polling, plain terminal fallback, and HTTP server |
 | `public/` | Browser dashboard and shepherd-dog icon |
 | `tests/` | Automated tests and controlled sample fixtures |
 | `scripts/` | Syntax and optional visual checks |
