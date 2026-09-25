@@ -5,6 +5,8 @@ import { createMonitor } from './monitor.mjs';
 import { getHerdrContext, readHerdrSnapshot, readDemoSnapshot } from './herdr.mjs';
 import { startServer } from './server.mjs';
 import { startTerminal } from './terminal.mjs';
+import { startTui } from './tui.mjs';
+import { createController } from './control.mjs';
 
 export function parseArgs(args, env = process.env) {
   const options = { terminal: true, demo: false, port: env.SHEP_PORT ?? '4317', help: false, version: false };
@@ -35,11 +37,11 @@ export async function main(args = process.argv.slice(2)) {
 
 Usage: shep [options]  (alias: shep-run)
 
-Run in any Herdr pane, from any directory. The terminal board and browser
+Run in any Herdr pane, from any directory. The Ink TUI and browser
 companion connect automatically to that pane's current Herdr instance.
 
   --web            Serve only the browser page from this Herdr pane
-  --terminal       Show the terminal board (the default)
+  --terminal       Show the interactive orchestrator (the default)
   --demo           Show clearly labeled sample agents inside Herdr
   --port PORT      Local HTTP port (default 4317, or SHEP_PORT)
   --version        Show the installed version
@@ -47,7 +49,9 @@ companion connect automatically to that pane's current Herdr instance.
 
 Live mode reads all workspaces in the current Herdr instance.
 Herdr supplies the socket and pane context; SHEP_SESSION is ignored.
-Use Ctrl+C to stop; in the terminal board use q outside search.`);
+Type /dispatch [provider:] your task; no prefix uses Codex.
+Use Enter to focus a selected agent and x to confirm closing it.
+Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
     return;
   }
   if (options.version) {
@@ -82,10 +86,12 @@ Use Ctrl+C to stop; in the terminal board use q outside search.`);
   }
   const url = `http://localhost:${server.address().port}`;
   let stopTerminal = () => {};
+  let controller;
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;
     stopping = true;
+    controller?.dispose();
     monitor.stop();
     stopTerminal();
     server.close();
@@ -95,8 +101,19 @@ Use Ctrl+C to stop; in the terminal board use q outside search.`);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  if (options.terminal) stopTerminal = startTerminal({ monitor, url, onQuit: shutdown });
-  else console.log(`Shep ${options.demo ? '(DEMO — sample agents)' : '(live Herdr monitoring)'}\n${url}\nPress Ctrl+C to stop.`);
+  try {
+    if (options.terminal) {
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        controller = createController({ context, monitor, mode: options.demo ? 'demo' : 'live' });
+      }
+      stopTerminal = process.stdin.isTTY && process.stdout.isTTY
+        ? startTui({ monitor, controller, url, onQuit: shutdown })
+        : startTerminal({ monitor, url, onQuit: shutdown });
+    } else console.log(`Shep ${options.demo ? '(DEMO — sample agents)' : '(live Herdr monitoring)'}\n${url}\nPress Ctrl+C to stop.`);
+  } catch (error) {
+    shutdown();
+    throw error;
+  }
   monitor.start();
   return { server, monitor, shutdown };
 }
