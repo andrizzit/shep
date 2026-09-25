@@ -9,6 +9,8 @@ Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dis
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show the same data from your current Herdr instance.
 
+For the full daily workflow, read the [Shep operating procedure](docs/SOP.md): dispatch, monitoring, follow-ups, closing agents, recovery, and updates.
+
 ![Shep browser dashboard showing grouped agents and workspace details with sample data](docs/images/shep-desktop.png)
 
 *Preview uses clearly labeled sample agents. Shep reads live status from Herdr when you run it normally.*
@@ -44,8 +46,10 @@ Current verification was performed on macOS with Node.js 26.7.0 and Herdr 0.9.1.
 
 ### 1. Get the source
 
+Version 0.3.0 is currently on `feat/ink-orchestrator`; use that branch to install the Ink interface and agent controls described here.
+
 ```sh
-git clone https://github.com/andrizzit/shep.git
+git clone --branch feat/ink-orchestrator https://github.com/andrizzit/shep.git
 cd shep
 ```
 
