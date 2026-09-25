@@ -46,10 +46,8 @@ Current verification was performed on macOS with Node.js 26.7.0 and Herdr 0.9.1.
 
 ### 1. Get the source
 
-Version 0.3.0 is currently on `feat/ink-orchestrator`; use that branch to install the Ink interface and agent controls described here.
-
 ```sh
-git clone --branch feat/ink-orchestrator https://github.com/andrizzit/shep.git
+git clone https://github.com/andrizzit/shep.git
 cd shep
 ```
 

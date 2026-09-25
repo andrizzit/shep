@@ -289,14 +289,14 @@ The normal daily workflow needs only `shep`. Use this section when installing on
 
 Requirements are Herdr 0.9.1 or newer and Node.js 22 or newer with npm. The actual runtime was verified on macOS with Node.js 26.7.0 and Herdr 0.9.1; Linux and Node.js 22 remain unverified support targets. Each provider needs its own CLI and authentication.
 
-As of this SOP's date, the 0.3.0 implementation is on **`feat/ink-orchestrator`**; the default `main` branch still contains the earlier version. For a fresh source checkout of this implementation:
+For a fresh source checkout, use the default `main` branch:
 
 ```sh
-git clone --branch feat/ink-orchestrator https://github.com/andrizzit/shep.git
+git clone https://github.com/andrizzit/shep.git
 cd shep
 ```
 
-For an existing checkout, confirm the branch with `git branch --show-current` and inspect `git status` before pulling. If it is clean and already on `feat/ink-orchestrator`, update with `git pull --ff-only`. Preserve local changes before changing branches or updating.
+For an existing checkout, confirm the branch with `git branch --show-current` and inspect `git status` before pulling. If it is clean and already on `main`, update with `git pull --ff-only`. Preserve local changes before changing branches or updating.
 
 Quit the running Shep process, then build and install from the source directory:
 
