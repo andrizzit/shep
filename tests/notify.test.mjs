@@ -77,3 +77,73 @@ test('initial global done and idle snapshots remain silent', () => {
     f.tick(); f.tick(); assert.equal(f.calls.length, 0);
   }
 });
+
+for (const field of ['provider', 'agentName', 'sessionId']) test(`same-terminal replacement with changed or missing ${field} cannot notify an obsolete task`, () => {
+  for (const status of ['done', 'idle', 'blocked']) for (const missing of [false, true]) {
+    const f = fixture();
+    Object.assign(f.task.target, { provider: 'codex', agentName: 'original-agent', sessionId: 'original-session' });
+    Object.assign(f.snapshot.agents[0], { provider: 'codex', agentName: 'original-agent', name: 'original-agent', sessionId: 'original-session' });
+    f.tick();
+    const replacement = f.snapshot.agents[0]; replacement.status = status;
+    if (missing) delete replacement[field]; else replacement[field] = 'replacement';
+    if (field === 'agentName') { if (missing) delete replacement.name; else replacement.name = 'replacement'; }
+    f.tick(); f.tick();
+    assert.equal(f.calls.length, 0, `${field}/${status}/${missing ? 'missing' : 'changed'}`);
+    f.task.launch = { state: 'needs_input', message: 'Obsolete startup outcome' };
+    f.tick(); assert.equal(f.calls.length, 0, 'An obsolete setup outcome cannot alert for the replacement');
+    f.notifier.dispose();
+  }
+});
+
+test('agentName fallback matches the task model and known session identity still gates notifications', () => {
+  const f = fixture();
+  Object.assign(f.task.target, { provider: 'codex', agentName: 'review-agent', sessionId: 'known-session' });
+  Object.assign(f.snapshot.agents[0], { provider: 'codex', name: 'review-agent', agentName: null, sessionId: 'known-session' });
+  f.tick(); f.snapshot.agents[0].status = 'done'; f.tick();
+  assert.equal(f.calls.length, 1); assert.match(f.calls[0].title, /finished/);
+});
+
+test('opt-in external replacement establishes its own baseline instead of inheriting prior agent execution', () => {
+  const f = fixture({ external: true });
+  const agent = { paneId: 'external-pane', terminalId: 'external-terminal', provider: 'claude', name: 'first',
+    agentName: 'first', sessionId: 'first-session', status: 'working', workspace: { name: 'Elsewhere' } };
+  f.snapshot.agents.push(agent); f.tick();
+  Object.assign(agent, { provider: 'codex', name: 'second', agentName: 'second', sessionId: 'second-session', status: 'done' });
+  f.tick(); assert.equal(f.calls.length, 0);
+  agent.status = 'working'; f.tick(); agent.status = 'idle'; f.tick();
+  assert.equal(f.calls.length, 1); assert.match(f.calls[0].title, /Elsewhere · Codex finished/);
+});
+
+test('real task outcomes retain conservative notifications regardless of snapshot/outcome arrival order', async () => {
+  const { createTask, transition } = await import('../src/tasks.mjs');
+  const { makeProject } = await import('./helpers/dispatch-fakes.mjs');
+  const at = '2026-09-27T12:00:00.000Z';
+  for (const snapshotFirst of [true, false]) for (const [state, status, expected] of [
+    ['submitted', 'done', 1], ['submitted', 'idle', 0], ['needs_input', 'blocked', 1],
+  ]) {
+    const project = makeProject();
+    const spec = { kind: 'dispatch', agents: [{ provider: 'codex', profile: null }], project, mode: 'auto', modeIntent: 'auto',
+      subfolder: '', template: null, task: 'Review code', inputTask: 'Review code', command: '/dispatch Review code' };
+    const placement = { projectKey: project.key, root: project.root, mode: 'auto', subfolder: '', label: 'Review code', placementStyle: 'tab' };
+    let task = createTask(spec, { id: 'review', attemptId: 'attempt', at, name: 'review-codex', placement });
+    const snapshot = { mode: 'live', source: { state: 'connected' }, agents: [] }, calls = [];
+    let publish;
+    const notifier = createNotifier({ monitor: { getSnapshot: () => snapshot, subscribe: listener => { publish = listener; return () => {}; } },
+      controller: { notify: request => { calls.push(request); } }, config: DEFAULT_CONFIG, getTasks: () => [task] });
+    task = transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage: 'target', at } });
+    assert.equal(task.target, null); publish(snapshot);
+    const agent = { paneId: 'w1:p2', terminalId: 'new-terminal', provider: 'codex', name: task.name, agentName: task.name, status, focused: false };
+    const outcome = { ok: state === 'submitted', state, message: state, taskId: task.id, attemptId: task.attemptId,
+      paneId: agent.paneId, terminalId: agent.terminalId, agentName: task.name };
+    if (snapshotFirst) { snapshot.agents = [agent]; publish(snapshot); }
+    task = transition(task, { type: 'outcome', outcome }); publish(snapshot);
+    if (!snapshotFirst) { snapshot.agents = [agent]; publish(snapshot); }
+    publish(snapshot); assert.equal(calls.length, expected, `${state}/${status}/snapshotFirst=${snapshotFirst}`);
+    // The same terminal can host a replacement CLI. Its later status must not
+    // be attributed to the task whose target came from the genuine outcome.
+    agent.provider = 'claude'; agent.status = 'done'; publish(snapshot);
+    agent.status = 'blocked'; publish(snapshot);
+    assert.equal(calls.length, expected, 'Replacement status is not the original task’s status');
+    notifier.dispose();
+  }
+});

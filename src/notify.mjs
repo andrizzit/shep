@@ -1,7 +1,16 @@
 import { PROVIDERS } from './dispatch/contracts.mjs';
 import { safeText } from './terminal.mjs';
 
-// Watches metadata only. Wiring into the application lifecycle belongs to D5.
+// Match the same optional identity constraints as tasks.mjs identify(). A pane
+// and terminal can survive an agent replacement, so neither alone is sufficient.
+const matches = (target, agent) => target && agent.paneId === target.paneId && agent.terminalId === target.terminalId
+  && (!target.provider || agent.provider === target.provider)
+  && (!target.agentName || agent.agentName === target.agentName || agent.name === target.agentName)
+  && (!target.sessionId || agent.sessionId === target.sessionId);
+const identity = target => JSON.stringify([target?.paneId, target?.terminalId, target?.provider ?? null,
+  target?.agentName ?? null, target?.sessionId ?? null]);
+
+// Watches metadata only; the caller owns lifecycle/config-reload wiring.
 export function createNotifier({ monitor, controller, config, getTasks = () => [], now = Date.now } = {}) {
   let disposed = false, baseline = false;
   let previous = new Map();
@@ -16,20 +25,23 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       label: task.intent?.label ?? task.name ?? '', launch: task.launch,
     }));
     if (settings.external) for (const agent of snapshot.agents ?? []) {
-      if (!tracked.some(task => task.target?.paneId === agent.paneId && task.target?.terminalId === agent.terminalId)) {
-        tracked.push({ id: `external:${agent.paneId}:${agent.terminalId}`, target: agent,
+      if (!tracked.some(task => matches(task.target, agent))) {
+        const target = { ...agent, agentName: agent.agentName || agent.name };
+        tracked.push({ id: `external:${identity(target)}`, target,
           project: agent.workspace?.name ?? 'Workspace', provider: agent.provider, label: agent.name });
       }
     }
     const current = new Map();
     for (const task of tracked) {
-      const agent = snapshot.agents?.find(a => a.paneId === task.target?.paneId && a.terminalId === task.target?.terminalId);
-      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), launch: task.launch?.state, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
+      const occupant = snapshot.agents?.find(a => a.paneId === task.target?.paneId && a.terminalId === task.target?.terminalId);
+      const agent = occupant && matches(task.target, occupant) ? occupant : null;
+      const replaced = Boolean(occupant && !agent);
+      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), identity: identity(task.target), launch: task.launch?.state, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
       current.set(task.id, value);
       const old = previous.get(task.id);
-      if (!baseline || !value.paneId || !value.terminalId) continue;
+      if (!baseline || !value.paneId || !value.terminalId || replaced) continue;
       const setup = value.launch === 'needs_input' && old?.launch !== 'needs_input';
-      const sameTarget = old?.paneId === value.paneId && old?.terminalId === value.terminalId;
+      const sameTarget = old?.identity === value.identity;
       // An idle shell may precede execution. Only a real agent's done status
       // supports first-observation completion; synthetic unknown is no evidence.
       const firstCompletion = value.launch === 'submitted' && value.observed && value.status === 'done'
@@ -39,7 +51,8 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       const label = `${safeText(task.project)} · ${safeText(names.get(task.provider) ?? task.provider ?? 'Agent')}`;
       if (setup) {
         transition = 'setup'; title = `⚠ ${label} needs setup`; body = task.launch.message; sound = 'request';
-      } else if (old?.status !== 'blocked' && value.status === 'blocked') {
+      } else if (old?.status !== 'blocked' && value.status === 'blocked'
+        && !(old?.launch === 'needs_input' && !old.observed)) {
         transition = 'blocked'; title = `⚠ ${label} needs input`; sound = 'request';
       } else if (firstCompletion || (sameTarget && old.observed && value.observed
         && ['working', 'unknown'].includes(old.status) && ['done', 'idle'].includes(value.status))) {
