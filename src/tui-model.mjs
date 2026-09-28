@@ -192,7 +192,9 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   }
   function pickerItems() {
     const query = state.projectQuery.toLocaleLowerCase().trim();
-    const projects = [...state.projects, ...state.trustRequired].filter(project => !query || `${project.name} ${project.root}`.toLocaleLowerCase().includes(query));
+    const all = [...state.projects, ...state.trustRequired];
+    const ranked = registry?.search?.(query) || all;
+    const projects = [...ranked, ...all.filter(project => query && project.root.toLocaleLowerCase().includes(query) && !ranked.some(item => (item.key || item.root) === (project.key || project.root)))];
     return [...projects, { other: true, name: 'Other folder…', root: 'Use a folder for this session' }];
   }
   function chooseProject(index = state.pickerIndex) {
@@ -235,17 +237,23 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       if (name === 'decide') { if (value && controlBlock(state)) inform(controlBlock(state), 'warning'); else void session.decide(Boolean(value)); }
       else if (name === 'cancel') void session.decide(false);
       else if (name === 'decision-scroll') change({ decision: { ...state.decision, offset: Math.max(0, state.decision.offset + value) } });
+      else if (name === 'decision-position') change({ decision: { ...state.decision, offset: value } });
       return;
     }
     if (name === 'board-toggle') { if (['board', 'search', 'detail'].includes(state.view)) change({ boardView: state.boardView === 'tasks' ? 'agents' : 'tasks', detailOffset: 0 }); return; }
     if (name === 'select-task') { if (['board', 'search'].includes(state.view)) change({ selectedTaskId: value, detailOffset: 0 }); return; }
-    if (name === 'details') { change({ view: 'detail', detailOffset: 0 }); return; }
-    if (name === 'detail-scroll') { change({ detailOffset: Math.max(0, state.detailOffset + value) }); return; }
+    if (name === 'details') { if (['board', 'search'].includes(state.view)) { change({ view: 'detail', detailOffset: 0 }); if (state.boardView === 'tasks') session.inspect(state.selectedTaskId); } return; }
+    if (name === 'notice-open') { if (state.notice) change({ view: 'notice', noticeDetail: { ...state.notice }, detailOffset: 0 }); return; }
+    if (name === 'detail-scroll') { if (['board', 'detail', 'notice'].includes(state.view)) change({ detailOffset: Math.max(0, state.detailOffset + value) }); return; }
+    if (name === 'detail-position') { change({ detailOffset: value }); return; }
+    if (name === 'suggest-next') { if (state.view === 'command') change({ suggestionIndex: (state.suggestionIndex + 1) % Math.max(1, state.suggestions.length) }); return; }
+    if (name === 'command-recall') { if (state.view === 'command') recall(value); return; }
     if (name === 'suggestion') { if (state.view === 'command') acceptSuggestion(value); return; }
     if (name === 'pick-project') { change({ view: 'picker', projectQuery: '', pickerIndex: 0, cursor: { ...state.cursor, projectQuery: 0 } }); return; }
-    if (name === 'pick') { chooseProject(value); return; }
+    if (name === 'pick') { if (state.view === 'picker') chooseProject(value); return; }
+    if (name === 'picker-move') { if (state.view === 'picker') change({ pickerIndex: Math.max(0, Math.min(pickerItems().length - 1, state.pickerIndex + value)) }); return; }
     if (name === 'folder-submit') { if (!state.folderLoading && !controlBlock(state)) void session.otherFolder(state.folderPath); return; }
-    if (name === 'field-next') { cycleField(value); return; }
+    if (name === 'field-next') { if (state.view === 'compose') cycleField(value); return; }
     if (state.view === 'command' && ['select', 'focus', 'close', 'new', 'search', 'filter'].includes(name)) return;
     if (name === 'command') { const command = state.command || '/dispatch '; change({ view: 'command', command, cursor: { ...state.cursor, command: graphemes(command).length } }); updateSuggestions(); return; }
     if (name === 'select') { if (state.view === 'board' || state.view === 'search') change({ selectedId: value, selectedTaskId: taskRows(state).find(row => row.agent?.id === value)?.id || state.selectedTaskId }); return; }
@@ -355,17 +363,18 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       else edit(input, key);
       return;
     }
-    if (state.view === 'detail') {
+    if (state.view === 'detail' || state.view === 'notice') {
       if (key.escape || key.leftArrow) action('cancel');
       else if (key.downArrow || input === 'j' || key.pageDown) action('detail-scroll', 1);
       else if (key.upArrow || input === 'k' || key.pageUp) action('detail-scroll', -1);
-      else if (key.return) action('focus');
-      else if (input === 'x') action('close');
+      else if (key.return && state.view === 'detail') action('focus');
+      else if (input === 'x' && state.view === 'detail') action('close');
       else if (input === 'q') action('quit');
       return;
     }
     if (input === 'q') action('quit');
     else if (input === 'g') action('board-toggle');
+    else if (input === 'i') action('notice-open');
     else if (key.rightArrow || input === 'd') action('details');
     else if (input === 'n') action('new');
     else if (input.startsWith('/') && !key.ctrl && !key.meta) { change({ view: 'command', command: input, cursor: { ...state.cursor, command: graphemes(input).length } }); updateSuggestions(); }

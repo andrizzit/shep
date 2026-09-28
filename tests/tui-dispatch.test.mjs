@@ -149,7 +149,7 @@ test('missing public agent never closes a task while its private pane still exis
     dispatch: async (request, { onProgress }) => {
       onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
       return { ok: true, state: 'submitted', message: 'Sent', taskId: request.taskId, attemptId: request.attemptId, paneId: 'w1:p7', terminalId: 'terminal7' };
-    }, getControlSnapshot: async () => ({ panes: present ? [{ pane_id: 'w1:p7', terminal_id: 'terminal7' }] : [] }),
+    }, getControlSnapshot: async () => ({ panes: present ? [{ pane_id: 'w1:p7', terminal_id: 'terminal7' }] : [], tabs: [], workspaces: [], agents: [] }),
   }, now: (() => { let time = Date.now(); return () => time += 1001; })() }); t.after(model.destroy);
   model.paste('/dispatch task'); model.key('', { return: true }); await tick();
   assert.equal(model.getTasks()[0].live.status, null);
@@ -196,4 +196,157 @@ test('unmount during required notice never acknowledges creation', async t => {
   } }); t.after(model.destroy);
   model.paste('/dispatch task'); model.key('', { return: true }); await tick();
   model.destroy(); flush.resolve(); await tick(); assert.equal(created, false);
+});
+
+test('a delayed topology response cannot close a newer task target', async t => {
+  const oldRead = deferred(); let reads = 0; let launches = 0;
+  const { model, publish } = await setup({ controller: {
+    dispatch: async (request, { onProgress }) => {
+      onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
+      launches += 1;
+      return { ok: true, state: 'submitted', message: 'Sent', taskId: request.taskId, attemptId: request.attemptId, paneId: `w1:p${launches + 5}`, terminalId: `terminal${launches}` };
+    }, getControlSnapshot: () => { reads += 1; return reads === 1 ? oldRead.promise : Promise.resolve({ panes: [], tabs: [], workspaces: [], agents: [] }); },
+  }, now: (() => { let time = Date.now(); return () => time += 1001; })() }); t.after(model.destroy);
+  model.paste('/dispatch first'); model.key('', { return: true }); await tick();
+  assert.equal(reads, 1);
+  model.paste('/dispatch second'); model.key('', { return: true }); await tick();
+  assert.equal(model.getTasks().length, 2);
+  oldRead.resolve({ panes: [], tabs: [], workspaces: [], agents: [] }); await tick();
+  assert.equal(model.getTasks()[0].live.status, 'closed');
+  assert.equal(model.getTasks()[1].live.status, null, 'A target created after the read needs fresh topology');
+  publish({ agents: [] }); await tick(); assert.equal(model.getTasks()[1].live.status, 'closed');
+});
+
+test('summaries use actual target cwd, throttle ten seconds and reject reused agent sessions', async t => {
+  let time = Date.now(); const summaries = []; let request;
+  const { model, publish } = await setup({ now: () => time, summarize: async (cwd, options) => {
+    summaries.push({ cwd, options });
+    return { state: 'available', changedFiles: 2, insertions: 8, deletions: 3, commitsAhead: 0, at: new Date(time).toISOString() };
+  }, controller: { dispatch: async (input, { onProgress }) => {
+    request = input;
+    onProgress({ taskId: input.taskId, attemptId: input.attemptId, stage: 'target', at: new Date(time).toISOString() });
+    return { ok: true, state: 'submitted', message: 'Sent', taskId: input.taskId, attemptId: input.attemptId, paneId: 'w1:p7', terminalId: 'terminal7',
+      placement: { mode: 'here', targetKind: 'tab', reason: 'Auto → here', cwd: project.root + '/src', notices: [] } };
+  } } }); t.after(model.destroy);
+  model.paste('/dispatch task'); model.key('', { return: true }); await tick();
+  const agent = { id: 'terminal7', terminalId: 'terminal7', paneId: 'w1:p7', provider: 'codex', name: request.name, agentName: request.name, sessionId: 'native-session1', status: 'working', workspace: { path: project.root } };
+  publish({ agents: [agent] }); await tick(); assert.equal(summaries.length, 0);
+  publish({ agents: [{ ...agent, status: 'done' }] }); await tick();
+  assert.equal(summaries.length, 1); assert.equal(summaries[0].cwd, project.root + '/src');
+  assert.equal(model.getTasks()[0].target.sessionId, 'native-session1');
+  publish({ agents: [{ ...agent, status: 'done' }] }); await tick(); assert.equal(summaries.length, 1);
+  time += 10001;
+  publish({ agents: [{ ...agent, sessionId: 'replacement-session', status: 'done' }] }); await tick(); assert.equal(summaries.length, 1);
+  publish({ source: { state: 'disconnected' }, agents: [{ ...agent, status: 'done' }] }); await tick(); assert.equal(summaries.length, 1);
+  publish({ source: { state: 'connected' }, agents: [{ ...agent, status: 'done' }] }); await tick(); assert.equal(summaries.length, 2);
+  assert.equal(model.getTasks()[0].summary.changedFiles, 2);
+});
+
+test('Other folder is session-only, preserves relative subfolder and never writes config', async t => {
+  const picked = makeProject({ key: 'dir:/fixture/other', root: '/fixture/other', name: 'other', kind: 'folder', commonDir: null, sources: ['session'] });
+  const registry = createFakeRegistry({ overrides: { registerEphemeral: path => path === '/fixture/other/src' ? { project: picked, subfolder: 'src' } : { error: 'Choose an existing absolute folder.', code: 'invalid_folder' } } });
+  let writes = 0;
+  const { model, calls } = await setup({ registry, addTrustedRepo: async () => { writes += 1; } }); t.after(model.destroy);
+  model.action('new'); model.action('pick-project'); model.key('', { downArrow: true }); model.key('', { return: true });
+  assert.equal(model.getSnapshot().view, 'folder');
+  model.paste('/fixture/other/src'); model.key('', { return: true }); await tick();
+  assert.equal(model.getSnapshot().view, 'compose');
+  assert.equal(model.getSnapshot().draft.projectKey, picked.key); assert.equal(model.getSnapshot().draft.subfolder, 'src');
+  model.action('field', 'prompt'); model.paste('literal task'); model.action('dispatch'); await tick();
+  assert.equal(calls[0].placement.root, picked.root); assert.equal(calls[0].placement.subfolder, 'src');
+  assert.equal(writes, 0); assert(registry.calls.some(call => call.method === 'registerEphemeral' && call.path === '/fixture/other/src'));
+});
+
+test('linked checkout context retains its own relative subfolder', async t => {
+  const linked = makeProject({ worktrees: [{ path: '/fixture/shep-feature', workspaceId: 'w2', branch: 'feature' }] });
+  const { model, calls } = await setup({ registry: createFakeRegistry({ projects: [linked], overrides: { containing: () => linked } }), controller: {
+    getProfiles: async () => ({ providers: [{ id: 'codex', name: 'Codex', available: true }], workspaces: [], defaultCwd: '/fixture/shep-feature/src/api' }),
+  } }); t.after(model.destroy);
+  model.paste('/dispatch task'); model.key('', { return: true }); await tick();
+  assert.equal(calls[0].placement.root, project.root); assert.equal(calls[0].placement.subfolder, 'src/api');
+});
+
+test('checkpoint panels fit 120×40,90×30,40×15 with their active controls visible', async t => {
+  const { model } = await setup(); t.after(model.destroy);
+  const { displayWidth } = await import('../src/terminal.mjs');
+  const verify = (pattern, width, height) => {
+    const text = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width, height }));
+    assert(text.split('\n').length <= height, `${width}×${height} overflowed vertically`);
+    assert(text.split('\n').every(line => displayWidth(line) <= width), `${width}×${height} overflowed horizontally`);
+    assert.match(text, pattern); assert.match(text, /Quit/); return text;
+  };
+  for (const [width, height] of [[119, 39], [89, 29], [39, 14]]) {
+    model.action('cancel'); verify(/TASKS/, width, height);
+    model.action('new'); model.action('field', 'prompt');
+    const compose = verify(/Dispatch agent/, width, height);
+    if (width === 39) assert.match(compose, /Prev.*Next.*Back/);
+    model.action('pick-project'); verify(/Other folder/, width, height);
+    model.action('pick', 1); verify(/Use folder/, width, height);
+    model.action('cancel'); model.action('cancel'); model.key('/dis');
+    verify(/dispatch/, width, height);
+  }
+});
+
+test('a timed-out required acknowledgement clears only its attempt and leaves input usable', async t => {
+  let acknowledgements = 0, creations = 0, attempts = 0;
+  const never = new Promise(() => {});
+  const { model } = await setup({ acknowledgeNotice: () => ++acknowledgements === 1 ? never : Promise.resolve(), controller: {
+    dispatch: async (request, { onProgress }) => {
+      attempts += 1;
+      const receipt = onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString(), placement: { mode: 'worktree', reason: 'Busy' }, noticeRequired: true, message: 'Worktree starts at repository root; selected subfolder is not applied' });
+      if (attempts === 1) {
+        receipt.then(() => { creations += 1; }, () => {});
+        await tick();
+        return { ok: false, state: 'failed', code: 'prelaunch_notice_failed', message: 'The location notice could not be displayed.', taskId: request.taskId, attemptId: request.attemptId };
+      }
+      await receipt; creations += 1;
+      return { ok: true, state: 'submitted', message: 'Sent', taskId: request.taskId, attemptId: request.attemptId };
+    },
+  } }); t.after(model.destroy);
+  model.paste('/dispatch first'); model.key('', { return: true }); await tick(); await tick();
+  assert.equal(model.getSnapshot().requiredNotice, null); assert.equal(model.getSnapshot().busy, null);
+  assert.equal(model.getTasks()[0].launch.state, 'failed'); assert.equal(creations, 0);
+  model.key('', { escape: true }); model.action('new'); assert.equal(model.getSnapshot().view, 'compose');
+  model.action('cancel'); model.paste('/dispatch deliberate new attempt'); model.key('', { return: true }); await tick();
+  assert.equal(creations, 1); assert.equal(model.getTasks()[1].launch.state, 'submitted');
+});
+
+test('opening task detail refreshes a throttled summary while working; stale failures cannot overwrite', async t => {
+  let time = Date.now(), request, count = 0;
+  const pending = deferred();
+  const { model, publish } = await setup({ now: () => time, summarize: async () => { count += 1; return pending.promise; }, controller: {
+    dispatch: async (input, { onProgress }) => {
+      request = input; onProgress({ taskId: input.taskId, attemptId: input.attemptId, stage: 'target', at: new Date(time).toISOString() });
+      return { ok: true, state: 'submitted', message: 'Sent', taskId: input.taskId, attemptId: input.attemptId, paneId: 'w1:p7', terminalId: 'terminal7',
+        placement: { mode: 'here', targetKind: 'tab', reason: 'Auto → here', cwd: project.root, notices: [] } };
+    },
+  } }); t.after(model.destroy);
+  model.paste('/dispatch task'); model.key('', { return: true }); await tick();
+  model.action('details'); await tick(); assert.equal(count, 1);
+  model.action('cancel'); model.action('details'); await tick(); assert.equal(count, 1);
+  publish({ agents: [{ id: 'terminal7', paneId: 'w1:p7', terminalId: 'terminal7', provider: 'codex', name: request.name, sessionId: 'bound-session', status: 'working', workspace: { path: project.root } }] });
+  pending.reject(new Error('Late Git failure')); await tick();
+  assert.equal(model.getTasks()[0].summary, null, 'A failure from before identity binding must not overwrite the current task');
+});
+
+test('compact Git-subfolder composer previews the root-only consequence without another confirmation', async t => {
+  const { model, calls } = await setup(); t.after(model.destroy);
+  model.action('new'); model.action('field', 'subfolder'); model.paste('src/api');
+  model.action('field', 'prompt'); model.paste('task');
+  const text = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 39, height: 14 }));
+  assert.match(text, /If worktree: starts at repo root;/);
+  assert.match(text, /selected subfolder isn't applied/);
+  assert.match(text, /Dispatch agent/); assert.match(text, /Prev.*Next.*Back/);
+  assert.equal(model.getSnapshot().decision, null); assert.equal(calls.length, 0);
+});
+
+test('ordinary long diagnostics have a full scrollable notice without losing the draft', async t => {
+  const { model } = await setup(); t.after(model.destroy);
+  const message = 'Config $: must contain valid JSON; file: /fixture/' + 'long-directory/'.repeat(15) + 'config.json';
+  model.paste('/dispatch preserved'); model.showNotice(message, 'warning'); model.action('notice-open');
+  assert.equal(model.getSnapshot().noticeDetail.message, message);
+  const text = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 39, height: 14 }));
+  assert.match(text, /NOTICE.*full message/); assert.match(text, /must contain valid JSON/); assert.match(text, /Back Esc/);
+  model.key('', { downArrow: true }); assert.equal(model.getSnapshot().detailOffset, 1);
+  model.key('', { escape: true }); model.action('command'); assert.equal(model.getSnapshot().command, '/dispatch preserved');
 });

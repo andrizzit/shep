@@ -45,12 +45,14 @@ export function summaryLabel(summary) {
 export function createTaskSession({ controller, registry, getConfig = () => DEFAULT_CONFIG, reloadConfig, addTrustedRepo, summarize,
   read, change, inform, acknowledgeNotice = async () => { throw new Error('The required location notice could not be displayed.'); }, now = () => Date.now() }) {
   let alive = true, discovery = 0, topologyPending = false, lastTopology = 0;
+  const noticeJobs = new Set();
   const consent = new Set(), summaryAt = new Map(), summaryPending = new Set(), abort = new AbortController();
   let noticeQueue = Promise.resolve();
   const config = () => getConfig() || DEFAULT_CONFIG;
   const updateTask = (id, update) => change({ tasks: read().tasks.map(task => task.id === id ? update(task) : task) });
   const context = () => ({ providers: read().profiles.providers, projects: read().projects, trustRequired: read().trustRequired,
     contextProjectKey: read().draft.projectKey, contextSubfolder: read().draft.subfolder, config: config() });
+  const targetSignature = task => JSON.stringify([task.attemptId, task.target?.paneId, task.target?.terminalId, task.target?.provider, task.target?.agentName, task.target?.sessionId]);
   const projectFor = key => [...read().projects, ...read().trustRequired].find(project => (project.key || project.root) === key);
 
   async function refresh({ force = false } = {}) {
@@ -72,7 +74,8 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     const cwd = read().profiles.defaultCwd;
     const project = cwd && registry.containing(cwd);
     if (!project || project.error) return;
-    const subfolder = project.kind === 'trust_required' ? '' : relative(project.root, cwd);
+    const checkout = [project.root, ...(project.worktrees || []).map(item => item.path)].filter(root => cwd === root || cwd.startsWith(root + '/')).sort((a, b) => b.length - a.length)[0] || project.root;
+    const subfolder = project.kind === 'trust_required' ? '' : relative(checkout, cwd);
     change({ draft: { ...read().draft, projectKey: project.key || project.root, subfolder: subfolder && !subfolder.startsWith('..') && !isAbsolute(subfolder) ? subfolder : '' } });
   }
   function discoveryBlock() {
@@ -128,19 +131,30 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       recall: source === 'command' ? [...read().recall.filter(item => item !== command), command].slice(-100) : read().recall, recallIndex: null });
     await launch(task, source);
   }
+  function cancelNotices(taskId, attemptId) {
+    for (const job of noticeJobs) if (!taskId || job.taskId === taskId && job.attemptId === attemptId) job.cancel();
+    const pending = read().requiredNotice;
+    if (pending && (!taskId || pending.event.taskId === taskId && pending.event.attemptId === attemptId)) change({ requiredNotice: null });
+  }
   function requiredProgress(event) {
+    let cancel;
+    const cancelled = new Promise(resolve => { cancel = resolve; });
+    const record = { taskId: event.taskId, attemptId: event.attemptId, cancelled: false, cancel: () => { record.cancelled = true; cancel(); } };
+    noticeJobs.add(record);
     const job = noticeQueue.catch(() => {}).then(async () => {
-      if (!alive || abort.signal.aborted) throw new Error('The location notice was cancelled.');
+      if (!alive || abort.signal.aborted || record.cancelled) throw new Error('The location notice was cancelled.');
       const task = read().tasks.find(item => item.id === event.taskId && item.attemptId === event.attemptId);
       if (!task) throw new Error('The location notice no longer matches this attempt.');
       const token = `${event.taskId}:${event.attemptId}:${randomUUID()}`;
       change({ requiredNotice: { token, event: structuredClone(event), subfolder: task.subfolder } });
       try {
-        await acknowledgeNotice(token, abort.signal);
-        if (!alive || read().requiredNotice?.token !== token) throw new Error('The location notice was not displayed for this attempt.');
+        await Promise.race([acknowledgeNotice(token, abort.signal), cancelled.then(() => { throw new Error('The location notice was cancelled before acknowledgement.'); })]);
+        if (!alive || record.cancelled || read().requiredNotice?.token !== token) throw new Error('The location notice was not displayed for this attempt.');
       } finally { if (read().requiredNotice?.token === token) change({ requiredNotice: null }); }
-    });
-    noticeQueue = job;
+    }).finally(() => noticeJobs.delete(record));
+    // Keep the serial queue usable after a timeout or unmount. The caller still
+    // receives the rejection; cancellation never counts as a successful flush.
+    noticeQueue = job.catch(() => {});
     return job;
   }
   async function launch(task, source) {
@@ -158,6 +172,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
         },
       });
       if (!alive) return;
+      cancelNotices(task.id, task.attemptId);
       updateTask(task.id, item => transition(item, { type: 'outcome', outcome: result }));
       const successful = result.ok && result.state === 'submitted';
       const hold = !successful && (['uncertain', 'needs_input'].includes(result.state) || Boolean(result.paneId));
@@ -174,6 +189,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       observe(read().snapshot);
     } catch (error) {
       if (!alive) return;
+      cancelNotices(task.id, task.attemptId);
       // No fabricated success or identity when the transport violates its seam.
       updateTask(task.id, item => ({ ...item, launch: { ...item.launch, state: 'uncertain', message: 'Launch response unavailable. Inspect Herdr before another launch.' } }));
       change({ busy: null, dispatchHold: true });
@@ -223,7 +239,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     finally { change({ folderLoading: false }); }
   }
   function observe(snapshot) {
-    if (!alive) return;
+    if (!alive || snapshot.mode === 'demo' || snapshot.source.state !== 'connected' || !snapshot.updatedAt) return;
     let missing = false;
     const tasks = read().tasks.map(task => {
       if (!task.target || task.live.status === 'closed') return task;
@@ -232,16 +248,21 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       if (!['submitted', 'needs_input', 'uncertain'].includes(task.launch.state)) return task;
       const status = ['working', 'blocked', 'done', 'idle', 'unknown'].includes(agent.status) ? agent.status : 'unknown';
       const updated = transition(task, { type: 'live', status, since: new Date(now()).toISOString(), paneId: task.target.paneId, terminalId: task.target.terminalId });
+      if (!updated.target.sessionId && agent.sessionId) updated.target.sessionId = agent.sessionId;
       if (['done', 'idle'].includes(status)) void refreshSummary(updated);
       return updated;
     });
     change({ tasks });
     if (missing && snapshot.mode !== 'demo' && snapshot.source.state === 'connected' && snapshot.updatedAt && controller.getControlSnapshot && !topologyPending && now() - lastTopology >= 1000) {
+      // A snapshot requested for older tasks cannot close a task that acquired
+      // its target while the read was in flight. Compare the captured attempt.
+      const candidates = new Map(tasks.filter(task => task.target).map(task => [task.id, targetSignature(task)]));
       topologyPending = true; lastTopology = now();
       Promise.resolve().then(() => controller.getControlSnapshot()).then(privateSnapshot => {
-        if (!alive || !Array.isArray(privateSnapshot?.panes) || read().snapshot.source.state !== 'connected') return;
+        if (!alive || !['panes', 'tabs', 'workspaces', 'agents'].every(key => Array.isArray(privateSnapshot?.[key])) || read().snapshot.source.state !== 'connected' || read().snapshot.mode === 'demo') return;
         change({ tasks: read().tasks.map(task => {
           if (!task.target || task.live.status === 'closed' || !['submitted', 'needs_input', 'uncertain'].includes(task.launch.state)) return task;
+          if (candidates.get(task.id) !== targetSignature(task)) return task;
           if (privateSnapshot.panes.some(pane => pane.pane_id === task.target.paneId || pane.terminal_id === task.target.terminalId)) return task;
           if (read().snapshot.agents.some(agent => matchesTask(task, agent))) return task;
           return transition(task, { type: 'live', status: 'closed', since: new Date(now()).toISOString(), ...task.target });
@@ -249,19 +270,24 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       }).catch(() => {}).finally(() => { topologyPending = false; });
     }
   }
+  const conflictingOccupant = task => read().snapshot.agents.some(agent => task.target && (agent.paneId === task.target.paneId || agent.terminalId === task.target.terminalId) && !matchesTask(task, agent));
   async function refreshSummary(task) {
-    if (!summarize || task.project.kind !== 'git' || !task.placement?.cwd || summaryPending.has(task.id) || now() - (summaryAt.get(task.id) ?? -Infinity) < 10000) return;
+    if (read().snapshot.mode === 'demo' || read().snapshot.source.state !== 'connected' || !read().snapshot.updatedAt) return;
+    if (!summarize || !task.target || conflictingOccupant(task) || task.project.kind !== 'git' || !task.placement?.cwd || summaryPending.has(task.id) || now() - (summaryAt.get(task.id) ?? -Infinity) < 10000) return;
+    const identity = targetSignature(task);
+    const apply = summary => { if (alive) updateTask(task.id, current => targetSignature(current) === identity && current.placement?.cwd === task.placement.cwd && !conflictingOccupant(current) ? { ...current, summary } : current); };
     summaryPending.add(task.id); summaryAt.set(task.id, now());
     try {
       const summary = await summarize(task.placement.cwd, { baseCommit: task.placement.baseCommit, signal: abort.signal,
         trustedRoot: (config().worktrees?.trustedRepos || []).includes(task.project.root) ? task.project.root : undefined });
-      if (alive) updateTask(task.id, current => current.attemptId === task.attemptId && current.placement?.cwd === task.placement.cwd ? { ...current, summary } : current);
-    } catch { if (alive) updateTask(task.id, current => ({ ...current, summary: { state: 'unavailable', message: 'Change summary unavailable.', at: new Date(now()).toISOString() } })); }
+      apply(summary);
+    } catch { apply({ state: 'unavailable', message: 'Change summary unavailable.', at: new Date(now()).toISOString() }); }
     finally { summaryPending.delete(task.id); }
   }
   return { refresh, initializeProject, context, parse, submit, decide, otherFolder, projectFor, observe,
+    inspect: rowId => { const task = read().tasks.find(item => `task:${item.id}` === rowId); if (task) void refreshSummary(task); },
     getTasks: () => structuredClone(read().tasks),
-    destroy: () => { alive = false; discovery += 1; abort.abort(); consent.clear(); } };
+    destroy: () => { alive = false; discovery += 1; abort.abort(); cancelNotices(); consent.clear(); } };
 }
 
 export function matchesTask(task, agent) {
