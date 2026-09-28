@@ -154,6 +154,8 @@ Shep only persists a configuration change when you explicitly confirm trust for 
 | `Enter` | Focus the selected agent’s actual Herdr pane |
 | `/` | Enter `/dispatch [provider][@project]: your task`; press Enter to launch |
 | `g` | Switch Tasks / Agents |
+| `d` / `→` | Open selected task or agent details; use Up/Down to scroll |
+| `i` | Read the full notice, including long diagnostic paths |
 | `n` | Open optional launch settings and multiline composer |
 | `Tab` / `Shift+Tab` | Move between composer fields |
 | `←` / `→` | Change the selected composer option |
@@ -163,6 +165,7 @@ Shep only persists a configuration change when you explicitly confirm trust for 
 | `x` | Confirm closing the selected agent |
 | `Esc` | Cancel or leave the current editor/dialog |
 | `r` | Refresh the overview |
+| `Ctrl+R` | Reload configuration, providers and projects |
 | `q` | Quit outside editors |
 | `Ctrl+C` | Quit Shep; leave agents running |
 

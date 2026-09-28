@@ -138,7 +138,7 @@ Prompts are limited to 64 KiB of UTF-8 text. Normal bracketed terminal paste pre
 
 ## 6. Monitor progress
 
-Press **g** to switch views. Tasks are grouped by project and show this run's dispatches, outcomes and changes. Agents are grouped by provider and include agents started outside Shep. Select a row for its detail and actions. Use **n** to compose a new task; re-run shortcuts are deferred. Tasks are not restored after restarting; native agents remain visible in Agents.
+Press **g** to switch views. Tasks are grouped by project and show this run's dispatches, outcomes and changes. Agents are grouped by provider and include agents started outside Shep. Select a row, then press **d** or **Right** for details; use Up/Down to scroll and Esc to return. Use **n** to compose a new task; re-run shortcuts are deferred. Tasks are not restored after restarting; native agents remain visible in Agents.
 
 | Status | Color | Meaning and next action |
 | --- | --- | --- |
@@ -292,6 +292,7 @@ Use discovered IDs rather than assuming that example pane numbers refer to your 
 | Invalid or missing directory | Enter an existing absolute directory in setup. Create the directory separately if it does not exist. |
 | Stale/disconnected data | The retained list is the last successful snapshot. Check `herdr status` in another shell, restore the connection, then press r. Agent controls remain disabled until connected. |
 | Settings fail to load or a workspace disappeared | Open setup and press Ctrl+R to reload configuration and discovery. Invalid settings produce a notice and use defaults for the affected section. Reopen Shep if its invoking pane/session changed. |
+| A notice is too long for the pane | Click the notice or press i from the overview, then scroll its full text with Up/Down. Press Esc to return. |
 | A dispatched agent is missing from the list | Clear search/filter with Esc from the overview and press r. Inspect the reported pane directly if startup is still awaiting authentication or detection. |
 | “Too small or zoomed” when dispatching | Enlarge or unzoom the target area in Herdr, or close completed panes after review. Then retry only if no pane was already created. |
 | “Enlarge this pane” | Give Shep at least 40 columns and 15 rows; more space improves readability. |
