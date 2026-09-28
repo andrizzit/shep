@@ -32,6 +32,23 @@ test('progress is correlated, ordered, and trust alone creates a fresh attempt',
   assert.throws(() => transition(task, { type: 'outcome', outcome: { ...outcome(task, 'submitted'), attemptId: prior } }), /different/);
   assert.throws(() => transition(submitted(), { type: 'confirmation', approved: true, attemptId: 'illegal', at }), /confirmation/);
 });
+test('a confirmed retry accepts its initial queued event without moving launch state backwards', () => {
+  let task = start(fresh());
+  const originalAttempt = task.attemptId;
+  task = transition(task, { type: 'outcome', outcome: outcome(task, 'needs_confirmation') });
+  task = transition(task, { type: 'confirmation', approved: true, attemptId: 'confirmed-attempt', at });
+  assert.throws(() => transition(task, { type: 'progress', event: { taskId: task.id, attemptId: originalAttempt, stage: 'queued', at } }), /different/);
+  for (const stage of ['queued', 'target', 'start', 'prompt']) {
+    task = transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage, at } });
+    assert.equal(task.launch.state, 'starting');
+    assert.equal(task.launch.stage, stage);
+  }
+  assert.throws(() => transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage: 'queued', at } }), /backwards/);
+  assert.throws(() => transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage: 'target', at } }), /backwards/);
+  task = transition(task, { type: 'outcome', outcome: outcome(task, 'submitted', { paneId: 'w1:p2', terminalId: 'term2' }) });
+  assert.equal(task.launch.state, 'submitted');
+  assert.equal(task.attemptId, 'confirmed-attempt');
+});
 test('live status and follow-up do not rewrite launch certainty or retain follow-up text', () => {
   let task = submitted(); assert.equal(displayState(task), 'unknown');
   const launch = structuredClone(task.launch);
