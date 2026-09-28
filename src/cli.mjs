@@ -7,6 +7,90 @@ import { startServer } from './server.mjs';
 import { startTerminal } from './terminal.mjs';
 import { startTui } from './tui.mjs';
 import { createController } from './control.mjs';
+import { loadConfig, addTrustedRepo } from './config.mjs';
+import { createProjectRegistry } from './projects.mjs';
+import { createGitRunner, summarize } from './gitinfo.mjs';
+import { createNotifier } from './notify.mjs';
+import { DEFAULT_CONFIG } from './dispatch/contracts.mjs';
+
+// Private TUI services. Browser/plain-terminal modes never create this runtime.
+export async function createDispatchRuntime({ context, monitor, mode = 'live', configFile } = {}) {
+  const configOptions = configFile ? { path: configFile } : {};
+  let settings = mode === 'demo'
+    ? { path: null, config: structuredClone(DEFAULT_CONFIG), errors: [], warnings: [] }
+    : await loadConfig(configOptions);
+  let controller, tui, notifier, disposed = false, configQueue = Promise.resolve();
+  const lifetime = new AbortController();
+  const notices = [], reportedConfig = new Set();
+  const getConfig = () => settings.config;
+  const notice = message => {
+    if (disposed) return;
+    if (tui) tui.showNotice?.(message, 'warning');
+    else notices.push(message);
+  };
+  const reportConfig = () => {
+    const messages = [...settings.errors, ...settings.warnings].map(issue => issue.message)
+      .filter(message => !reportedConfig.has(message));
+    messages.forEach(message => reportedConfig.add(message));
+    if (messages.length) notice(messages.join('; '));
+  };
+  const runGit = createGitRunner({ env: context.env, getConfig });
+  const git = (args, options = {}) => runGit(args, { ...options,
+    signal: options.signal ? AbortSignal.any([lifetime.signal, options.signal]) : lifetime.signal });
+  const registry = createProjectRegistry({ getConfig, git, history: [], snapshot: () => mode === 'demo'
+    ? { workspaces: [], tabs: [], panes: [], agents: [] } : controller.getControlSnapshot() });
+  controller = createController({ context, monitor, mode, getConfig, registry, git, onNotice: notice });
+  function startNotifier() {
+    notifier?.dispose();
+    notifier = undefined;
+    if (!disposed && tui && mode !== 'demo') {
+      notifier = createNotifier({ monitor, controller, config: getConfig(), getTasks: () => tui.getTasks?.() ?? [] });
+    }
+  }
+  function updateConfig(read) {
+    const next = configQueue.then(async () => {
+      if (disposed) throw new Error('Shep is stopping.');
+      const previousNotifications = JSON.stringify(getConfig().notifications);
+      settings = await read();
+      reportConfig();
+      if (JSON.stringify(getConfig().notifications) !== previousNotifications) startNotifier();
+      return settings;
+    });
+    configQueue = next.catch(() => {});
+    return next;
+  }
+  return {
+    controller,
+    tuiOptions: {
+      registry, getConfig,
+      reloadConfig: () => mode === 'demo' ? Promise.resolve(settings) : updateConfig(() => loadConfig(configOptions)),
+      addTrustedRepo: root => mode === 'demo'
+        ? Promise.reject(new Error('Repository trust cannot be changed in demo mode.'))
+        : updateConfig(() => addTrustedRepo(root, configOptions)),
+      summarize: (dir, { baseCommit } = {}) => {
+        if (disposed) return Promise.reject(new Error('Shep is stopping.'));
+        const project = registry.containing(dir);
+        const trustedRoot = project && getConfig().worktrees.trustedRepos.includes(project.root) ? project.root : undefined;
+        return summarize(dir, { baseCommit, git, trustedRoot });
+      },
+    },
+    attachTui(handle) {
+      if (disposed) return;
+      tui = handle;
+      reportConfig();
+      notices.splice(0).forEach(message => notice(message));
+      startNotifier();
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      notifier?.dispose();
+      lifetime.abort();
+      controller.dispose();
+      notices.length = 0;
+    },
+  };
+}
 
 export function parseArgs(args, env = process.env) {
   const options = { terminal: true, demo: false, port: env.SHEP_PORT ?? '4317', help: false, version: false };
@@ -49,7 +133,9 @@ companion connect automatically to that pane's current Herdr instance.
 
 Live mode reads all workspaces in the current Herdr instance.
 Herdr supplies the socket and pane context; SHEP_SESSION is ignored.
-Type /dispatch [provider:] your task; no prefix uses Codex.
+Type /dispatch claude@project: your task to target a project.
+Type /dispatch your task for Codex in the context project.
+Use g to switch Tasks/Agents, or n for the project picker and composer.
 Use Enter to focus a selected agent and x to confirm closing it.
 Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
     return;
@@ -87,11 +173,13 @@ Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
   const url = `http://localhost:${server.address().port}`;
   let stopTerminal = () => {};
   let controller;
+  let dispatchRuntime;
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;
     stopping = true;
-    controller?.dispose();
+    if (dispatchRuntime) dispatchRuntime.dispose();
+    else controller?.dispose();
     monitor.stop();
     stopTerminal();
     server.close();
@@ -104,11 +192,17 @@ Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
   try {
     if (options.terminal) {
       if (process.stdin.isTTY && process.stdout.isTTY) {
-        controller = createController({ context, monitor, mode: options.demo ? 'demo' : 'live' });
+        dispatchRuntime = await createDispatchRuntime({ context, monitor, mode: options.demo ? 'demo' : 'live' });
+        controller = dispatchRuntime.controller;
+        if (stopping) {
+          dispatchRuntime.dispose();
+          return { server, monitor, shutdown };
+        }
       }
       stopTerminal = process.stdin.isTTY && process.stdout.isTTY
-        ? startTui({ monitor, controller, url, onQuit: shutdown })
+        ? startTui({ monitor, controller, ...dispatchRuntime.tuiOptions, url, onQuit: shutdown })
         : startTerminal({ monitor, url, onQuit: shutdown });
+      dispatchRuntime?.attachTui(stopTerminal);
     } else console.log(`Shep ${options.demo ? '(DEMO — sample agents)' : '(live Herdr monitoring)'}\n${url}\nPress Ctrl+C to stop.`);
   } catch (error) {
     shutdown();
