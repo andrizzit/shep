@@ -467,7 +467,7 @@ test('orchestrator QA: ambiguous prompt timeout is not retried or rolled back by
   assert.doesNotMatch(result.message, /PRIVATE_TRANSPORT_DETAILS/);
 });
 
-test('orchestrator QA: concurrent launch is rejected and disposal aborts pending startup without later writes', async () => {
+test('orchestrator QA: disposal aborts pending startup without later writes', async () => {
   let entered;
   const starting = new Promise(resolve => { entered = resolve; });
   let signal;
@@ -485,9 +485,6 @@ test('orchestrator QA: concurrent launch is rejected and disposal aborts pending
   } });
   const pending = fixture.controller.dispatch({ provider: 'codex', prompt: 'Only one launch.', cwd: temporary });
   await starting;
-  const duplicate = await fixture.controller.dispatch({ provider: 'codex', prompt: 'Only one launch.', cwd: temporary });
-  assert.equal(duplicate.ok, false);
-  assert.equal(duplicate.code, 'busy');
   fixture.controller.dispose();
   assert.equal((await pending).ok, false);
   assert.equal(signal.aborted, true);
@@ -497,6 +494,93 @@ test('orchestrator QA: concurrent launch is rejected and disposal aborts pending
   assert.ok(fixture.raw.result.snapshot.panes.some(pane => pane.pane_id === 'w1:p9'));
   const count = fixture.calls.length;
   assert.equal((await fixture.controller.focus(fixture.selected())).ok, false);
+  assert.equal(fixture.calls.length, count);
+});
+
+test('orchestrator QA: three launches run, the fourth queues FIFO, and disposal cancels queued work without duplicate sends', async t => {
+  let nextPane = 9;
+  const started = [], starts = new Map(), progress = new Map();
+  const fixture = controllerFixture({ invoke: async (argv, raw, options) => {
+    if (argv[0] === 'pane' && argv[1] === 'split') {
+      const pane = { pane_id: `w1:p${nextPane}`, terminal_id: `queue-terminal-${nextPane++}`, tab_id: 'w1:t1', workspace_id: 'w1' };
+      raw.result.snapshot.panes.push(pane);
+      return { result: { pane } };
+    }
+    if (argv[0] !== 'agent' || argv[1] !== 'start') return undefined;
+    const name = argv[2];
+    const pane = raw.result.snapshot.panes.find(item => item.pane_id === argv[argv.indexOf('--pane') + 1]);
+    await new Promise((resolve, reject) => {
+      const cancel = () => {
+        const error = new Error('Controlled queued startup aborted');
+        error.code = 'disposed';
+        reject(error);
+      };
+      options.signal.addEventListener('abort', cancel, { once: true });
+      starts.set(name, {
+        signal: options.signal,
+        release: () => { options.signal.removeEventListener('abort', cancel); resolve(); },
+      });
+      started.push(name);
+      if (options.signal.aborted) cancel();
+    });
+    const agent = plainAgent({ ...pane, name, agent: 'codex', agent_status: 'idle' });
+    raw.result.snapshot.agents.push(agent);
+    return { result: { agent } };
+  } });
+  t.after(() => fixture.controller.dispose());
+  const requests = Array.from({ length: 5 }, (_, index) => ({
+    taskId: `queue-task-${index + 1}`, attemptId: `queue-attempt-${index + 1}`,
+    provider: 'codex', name: `queue-agent-${index + 1}`, cwd: temporary,
+    prompt: `Literal queue task ${index + 1}: $(not-a-command)\nSecond line.`,
+  }));
+  const pending = requests.map(request => fixture.controller.dispatch(request, {
+    onProgress: event => {
+      const events = progress.get(event.taskId) ?? [];
+      events.push(event.stage); progress.set(event.taskId, events);
+    },
+  }));
+  assert.equal(fixture.controller.dispatch(requests[0]), pending[0]);
+  assert.equal(fixture.controller.dispatch(requests[3]), pending[3]);
+  await waitFor(() => started.length === 3, 'Three independent launches did not reach startup');
+  assert.deepEqual([...started].sort(), requests.slice(0, 3).map(request => request.name).sort());
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'split').length, 3);
+  assert.deepEqual(progress.get(requests[3].taskId), ['queued']);
+  assert.deepEqual(progress.get(requests[4].taskId), ['queued']);
+  assert.equal(writes(fixture).some(({ argv }) => argv[1] === 'prompt'), false);
+
+  starts.get(requests[0].name).release();
+  const submitted = await pending[0];
+  assert.equal(submitted.state, 'submitted', submitted.message);
+  await waitFor(() => started.length === 4, 'The fourth launch did not start when capacity became available');
+  assert.deepEqual([...started.slice(0, 3)].sort(), requests.slice(0, 3).map(request => request.name).sort());
+  assert.equal(started[3], requests[3].name);
+  assert.deepEqual(progress.get(requests[4].taskId), ['queued']);
+  assert.equal(fixture.controller.dispatch(requests[0]), pending[0]);
+  assert.deepEqual(fixture.calls.filter(({ argv }) => argv[1] === 'prompt').map(({ argv }) => argv), [
+    ['agent', 'prompt', submitted.paneId, requests[0].prompt],
+  ]);
+
+  fixture.controller.dispose();
+  const results = await Promise.all(pending);
+  for (const result of results.slice(1, 4)) {
+    assert.equal(result.state, 'uncertain');
+    assert.equal(result.code, 'disposed');
+    assert.ok(fixture.raw.result.snapshot.panes.some(pane => pane.pane_id === result.paneId && pane.terminal_id === result.terminalId));
+  }
+  assert.equal(results[4].state, 'failed');
+  assert.equal(results[4].code, 'disposed');
+  assert.equal(results[4].created, undefined);
+  assert.equal(results[4].paneId, undefined);
+  for (const start of starts.values()) assert.equal(start.signal.aborted, true);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'split').length, 4);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'start').length, 4);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'prompt').length, 1);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'close').length, 0);
+  assert.equal(new Set(results.slice(0, 4).map(result => result.paneId)).size, 4);
+  const count = fixture.calls.length;
+  assert.equal(fixture.controller.dispatch(requests[3]), pending[3]);
+  assert.equal(fixture.controller.dispatch(requests[4]), pending[4]);
+  assert.equal((await fixture.controller.dispatch({ ...requests[4], taskId: 'after-disposal' })).code, 'disposed');
   assert.equal(fixture.calls.length, count);
 });
 
