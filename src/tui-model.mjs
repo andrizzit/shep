@@ -1,8 +1,9 @@
 import { stripVTControlCharacters } from 'node:util';
 import { safeText } from './terminal.mjs';
+import { createTaskSession, taskRows, commandSuggestions, TASK_LABELS } from './tui-tasks.mjs';
 
 export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs input', done: 'Done', idle: 'Idle', unknown: 'Unknown' });
-export const FIELDS = ['provider', 'name', 'workspaceId', 'cwd', 'prompt', 'dispatch'];
+export const FIELDS = ['provider', 'projectKey', 'subfolder', 'name', 'prompt', 'dispatch'];
 const priority = { blocked: 0, working: 1, done: 2, idle: 3, unknown: 4 };
 const providerNames = new Map([['claude', 'Claude'], ['codex', 'Codex'], ['grok', 'Grok'], ['kiro', 'Kiro']]);
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -94,29 +95,35 @@ export function editText(value, cursor, input, key = {}, multiline = false) {
   return { value: chars.join(''), cursor };
 }
 
-export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
+export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, onQuit = () => {} }) {
   let alive = true;
   let initialized = false;
   let catalogGeneration = 0;
   const subscribers = new Set();
   let state = {
-    snapshot: monitor.getSnapshot(), view: 'board', selectedId: null, filter: 'all', query: '', command: '',
-    field: 'provider', cursor: { name: 0, cwd: 0, prompt: 0, search: 0, command: 0 },
-    draft: { provider: '', name: '', workspaceId: '', cwd: '', prompt: '' },
+    snapshot: monitor.getSnapshot(), view: 'board', boardView: 'tasks', selectedTaskId: null, selectedId: null, filter: 'all', query: '', command: '',
+    field: 'provider', cursor: { name: 0, subfolder: 0, prompt: 0, search: 0, command: 0, projectQuery: 0, folderPath: 0 },
+    draft: { provider: '', name: '', projectKey: '', subfolder: '', prompt: '' },
     profiles: { providers: [], workspaces: [], defaultCwd: '', defaultWorkspaceId: '' },
     profilesLoading: true, profilesError: null, busy: null, notice: null,
     confirmation: null, confirmClose: false, dispatchHold: false, resultTarget: null,
+    tasks: [], projects: [], trustRequired: [], projectsLoading: true, projectsError: null, projectWarnings: [],
+    decision: null, requiredNotice: null, detailOffset: 0, projectQuery: '', pickerIndex: 0, folderPath: '', folderLoading: false,
+    suggestions: [], suggestionIndex: 0, recall: [], recallIndex: null, recallDraft: '',
   };
   function change(patch) {
     if (!alive) return;
     state = { ...state, ...patch };
     const matches = visibleAgents(state);
     if (!matches.some(agent => agent.id === state.selectedId)) state = { ...state, selectedId: matches[0]?.id || null };
+    const rows = taskRows(state);
+    if (!rows.some(row => row.id === state.selectedTaskId)) state = { ...state, selectedTaskId: rows[0]?.id || null };
     for (const subscriber of subscribers) subscriber();
   }
   change({});
-  const unsubscribe = monitor.subscribe(snapshot => change({ snapshot }));
-  const selected = () => state.snapshot.agents.find(agent => agent.id === state.selectedId);
+  const session = createTaskSession({ controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, read: () => state, change, inform });
+  const unsubscribe = monitor.subscribe(snapshot => { change({ snapshot }); session.observe(snapshot); });
+  const selected = () => state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.agent : state.snapshot.agents.find(agent => agent.id === state.selectedId);
   function targetBlock(target, closing = false) {
     const blocked = controlBlock(state);
     if (blocked) return blocked;
@@ -138,10 +145,11 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       const patch = { profiles, profilesLoading: false };
       if (!initialized) {
         initialized = true;
-        patch.draft = { ...state.draft, provider: profiles.providers.find(provider => provider.id === 'codex' && provider.available)?.id || profiles.providers.find(provider => provider.available)?.id || profiles.providers[0]?.id || '', workspaceId: profiles.defaultWorkspaceId || profiles.workspaces[0]?.id || '', cwd: profiles.defaultCwd || '' };
-        patch.cursor = { ...state.cursor, cwd: graphemes(patch.draft.cwd).length };
+        patch.draft = { ...state.draft, provider: profiles.providers.find(provider => provider.id === 'codex' && provider.available)?.id || profiles.providers.find(provider => provider.available)?.id || profiles.providers[0]?.id || '' };
+
       }
       change(patch);
+      session.initializeProject();
     } catch (error) { if (generation === catalogGeneration) change({ profilesLoading: false, profilesError: safeText(error.message || 'Unable to read launch settings.') }); }
   }
   async function run(kind, target, partial = false) {
@@ -153,79 +161,100 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       change({ busy: null, notice: { message: safeText(outcome.message), kind: outcome.ok ? 'success' : 'warning' }, ...(kind === 'closeAgent' && outcome.ok ? { view: 'board', confirmation: null } : {}) });
     } catch (error) { change({ busy: null, notice: { message: safeText(error.message || 'The action failed. Check Herdr before retrying.'), kind: 'warning' } }); }
   }
-  async function dispatch() {
+  async function dispatch(source = 'compose') {
     const blocked = controlBlock(state);
     if (blocked) { inform(blocked, 'warning'); return; }
     if (state.dispatchHold) { inform('Review the previous launch, then use “Allow another launch” before dispatching again.', 'warning'); return; }
-    const provider = state.profiles.providers.find(item => item.id === state.draft.provider);
-    if (state.profilesLoading || state.profilesError) { inform('Wait for launch settings or refresh them with Ctrl+R.', 'warning'); return; }
-    if (!provider?.available) { inform(provider?.reason || 'This provider executable is unavailable.', 'warning'); return; }
-    if (!state.draft.prompt.trim()) { change({ field: 'prompt' }); inform('Add a prompt before dispatching.', 'warning'); return; }
-    if (Buffer.byteLength(state.draft.prompt, 'utf8') > 65536) { change({ field: 'prompt' }); inform('The prompt exceeds 65536 UTF-8 bytes. Shorten it before dispatching.', 'warning'); return; }
-    if (state.draft.name.trim() && !/^[a-z][a-z0-9_-]{0,31}$/.test(state.draft.name.trim())) { change({ field: 'name' }); inform('Names start with a-z and use a-z, 0-9, _ or -; maximum 32 characters.', 'warning'); return; }
-    if (!state.draft.cwd.trim()) { change({ field: 'cwd' }); inform('Choose a working directory.', 'warning'); return; }
-    const draft = { ...state.draft };
-    change({ busy: 'dispatch', notice: { message: 'Starting a native Herdr agent…', kind: 'info' } });
-    try {
-      const result = await controller.dispatch({ provider: draft.provider, prompt: draft.prompt, cwd: draft.cwd, ...(draft.name.trim() ? { name: draft.name.trim() } : {}), ...(draft.workspaceId ? { workspaceId: draft.workspaceId } : {}) });
-      const successful = result.ok && result.state === 'submitted';
-      const hold = !successful && (result.state === 'uncertain' || result.state === 'needs_input' || Boolean(result.paneId));
-      const target = result.paneId ? { ...result, id: result.terminalId || result.paneId, paneId: result.paneId, terminalId: result.terminalId, provider: draft.provider, name: result.agentName || draft.name || provider.name, status: 'unknown', workspace: { id: draft.workspaceId, path: draft.cwd } } : null;
-      change({ busy: null, notice: { message: safeText(`${result.message}${result.paneId ? ` Pane: ${result.paneId}.` : ''}`), kind: successful ? 'success' : 'warning' }, dispatchHold: hold, resultTarget: target,
-        ...(successful ? { view: 'board', command: '', draft: { ...draft, name: '', prompt: '' }, cursor: { ...state.cursor, name: 0, prompt: 0, command: 0 } } : {}) });
-    } catch (error) {
-      change({ busy: null, dispatchHold: true, notice: { message: safeText(`${error.message || 'Launch outcome unavailable.'} Check Herdr before another launch; your prompt is preserved.`), kind: 'warning' } });
-    }
-  }
-  function submitCommand() {
-    if (controlBlock(state)) { inform(controlBlock(state), 'warning'); return; }
     if (state.profilesLoading || state.profilesError) { inform('Launch settings are unavailable. Use Ctrl+R to refresh them.', 'warning'); return; }
-    try {
-      const parsed = parseDispatch(state.command, state.profiles.providers);
-      const provider = state.profiles.providers.find(item => item.id === parsed.provider);
-      if (!provider?.available) { inform(`${provider?.name || parsed.provider}: ${provider?.reason || 'This provider executable is unavailable.'}`, 'warning'); return; }
-      change({ draft: { ...state.draft, provider: parsed.provider, name: '', prompt: parsed.prompt }, cursor: { ...state.cursor, prompt: graphemes(parsed.prompt).length } });
-      void dispatch();
-    } catch (error) { inform(error.message, 'warning'); }
+    await session.submit(source);
+  }
+  const submitCommand = () => { void dispatch('command'); };
+  function updateSuggestions() {
+    const cursor = graphemes(state.command).slice(0, state.cursor.command).join('').length;
+    change({ suggestions: commandSuggestions(state.command, cursor, session.context()), suggestionIndex: 0 });
+  }
+  function acceptSuggestion(index = state.suggestionIndex) {
+    const suggestion = state.suggestions[index];
+    if (!suggestion) return;
+    const command = state.command.slice(0, suggestion.replaceStart) + suggestion.value + state.command.slice(suggestion.replaceEnd);
+    const cursor = graphemes(command.slice(0, suggestion.replaceStart + suggestion.value.length)).length;
+    change({ command, cursor: { ...state.cursor, command: cursor }, recallIndex: null });
+    updateSuggestions();
+  }
+  function recall(direction) {
+    if (state.command.includes('\n') || !state.recall.length) return false;
+    const index = state.recallIndex === null ? state.recall.length : state.recallIndex;
+    const next = Math.max(0, Math.min(state.recall.length, index + direction));
+    const recallDraft = state.recallIndex === null ? state.command : state.recallDraft;
+    const command = next === state.recall.length ? recallDraft : state.recall[next];
+    change({ command, recallDraft, recallIndex: next, cursor: { ...state.cursor, command: graphemes(command).length } });
+    updateSuggestions(); return true;
+  }
+  function pickerItems() {
+    const query = state.projectQuery.toLocaleLowerCase().trim();
+    const projects = [...state.projects, ...state.trustRequired].filter(project => !query || `${project.name} ${project.root}`.toLocaleLowerCase().includes(query));
+    return [...projects, { other: true, name: 'Other folder…', root: 'Use a folder for this session' }];
+  }
+  function chooseProject(index = state.pickerIndex) {
+    const project = pickerItems()[index];
+    if (!project) return;
+    if (project.other) { change({ view: 'folder', cursor: { ...state.cursor, folderPath: graphemes(state.folderPath).length } }); return; }
+    change({ view: 'compose', field: 'subfolder', draft: { ...state.draft, projectKey: project.key || project.root, subfolder: '' } });
   }
   function edit(input, key = {}, paste = false) {
-    const field = state.view === 'search' ? 'search' : state.view === 'command' ? 'command' : state.field;
-    if (!['name', 'cwd', 'prompt', 'search', 'command'].includes(field)) return;
-    const value = field === 'search' ? state.query : field === 'command' ? state.command : state.draft[field];
+    const field = state.view === 'search' ? 'search' : state.view === 'command' ? 'command' : state.view === 'picker' ? 'projectQuery' : state.view === 'folder' ? 'folderPath' : state.field;
+    if (!['name', 'subfolder', 'prompt', 'search', 'command', 'projectQuery', 'folderPath'].includes(field)) return;
+    const top = ['command', 'projectQuery', 'folderPath'].includes(field);
+    const value = field === 'search' ? state.query : top ? state[field] : state.draft[field];
     const edited = editText(value, state.cursor[field], input, paste ? {} : key, field === 'prompt' || field === 'command');
     if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) { inform('This draft exceeds 256 KiB. Paste a smaller prompt.', 'warning'); return; }
-    change({ cursor: { ...state.cursor, [field]: edited.cursor }, ...(field === 'search' ? { query: edited.value } : field === 'command' ? { command: edited.value } : { draft: { ...state.draft, [field]: edited.value } }) });
+    change({ recallIndex: null, cursor: { ...state.cursor, [field]: edited.cursor }, ...(field === 'search' ? { query: edited.value } : top ? { [field]: edited.value, ...(field === 'projectQuery' ? { pickerIndex: 0 } : {}) } : { draft: { ...state.draft, [field]: edited.value } }) });
+    if (field === 'command') updateSuggestions();
   }
   function cycleField(direction = 1) {
     const index = FIELDS.indexOf(state.field);
     change({ field: FIELDS[(index + direction + FIELDS.length) % FIELDS.length] });
   }
   function cycleChoice(direction = 1) {
-    const list = state.field === 'provider' ? state.profiles.providers : state.profiles.workspaces;
+    const list = state.profiles.providers.filter(provider => provider.available);
     if (!list.length) return;
-    const index = list.findIndex(item => item.id === state.draft[state.field]);
-    const next = list[(index + direction + list.length) % list.length];
-    const draft = { ...state.draft, [state.field]: next.id };
-    if (state.field === 'workspaceId' && next.path) draft.cwd = next.path;
-    change({ draft, cursor: { ...state.cursor, cwd: graphemes(draft.cwd).length } });
+    const index = list.findIndex(item => item.id === state.draft.provider);
+    change({ draft: { ...state.draft, provider: list[(index + direction + list.length) % list.length].id } });
   }
   function moveSelection(direction) {
-    const agents = visibleAgents(state);
-    if (!agents.length) return;
-    const index = agents.findIndex(agent => agent.id === state.selectedId);
-    change({ selectedId: agents[Math.max(0, Math.min(agents.length - 1, index + direction))].id });
+    const rows = state.boardView === 'tasks' ? taskRows(state) : visibleAgents(state);
+    if (!rows.length) return;
+    const field = state.boardView === 'tasks' ? 'selectedTaskId' : 'selectedId';
+    const index = rows.findIndex(row => row.id === state[field]);
+    change({ [field]: rows[Math.max(0, Math.min(rows.length - 1, index + direction))].id, detailOffset: 0 });
   }
   function action(name, value) {
     if (name === 'quit') { onQuit(); return; }
+    if (state.busy || state.requiredNotice) return;
+    if (state.view === 'decision') {
+      if (name === 'decide') { if (value && controlBlock(state)) inform(controlBlock(state), 'warning'); else void session.decide(Boolean(value)); }
+      else if (name === 'cancel') void session.decide(false);
+      else if (name === 'decision-scroll') change({ decision: { ...state.decision, offset: Math.max(0, state.decision.offset + value) } });
+      return;
+    }
+    if (name === 'board-toggle') { if (['board', 'search', 'detail'].includes(state.view)) change({ boardView: state.boardView === 'tasks' ? 'agents' : 'tasks', detailOffset: 0 }); return; }
+    if (name === 'select-task') { if (['board', 'search'].includes(state.view)) change({ selectedTaskId: value, detailOffset: 0 }); return; }
+    if (name === 'details') { change({ view: 'detail', detailOffset: 0 }); return; }
+    if (name === 'detail-scroll') { change({ detailOffset: Math.max(0, state.detailOffset + value) }); return; }
+    if (name === 'suggestion') { if (state.view === 'command') acceptSuggestion(value); return; }
+    if (name === 'pick-project') { change({ view: 'picker', projectQuery: '', pickerIndex: 0, cursor: { ...state.cursor, projectQuery: 0 } }); return; }
+    if (name === 'pick') { chooseProject(value); return; }
+    if (name === 'folder-submit') { if (!state.folderLoading && !controlBlock(state)) void session.otherFolder(state.folderPath); return; }
+    if (name === 'field-next') { cycleField(value); return; }
     if (state.view === 'command' && ['select', 'focus', 'close', 'new', 'search', 'filter'].includes(name)) return;
-    if (name === 'command') { const command = state.command || '/dispatch '; change({ view: 'command', command, cursor: { ...state.cursor, command: graphemes(command).length } }); return; }
-    if (name === 'select') { if (state.view === 'board' || state.view === 'search') change({ selectedId: value }); return; }
-    if (name === 'field') { if (state.view === 'compose') { if (state.field === value && ['provider', 'workspaceId'].includes(value)) cycleChoice(1); else change({ field: value }); } return; }
-    if (name === 'refresh') { void monitor.refresh(); if (state.view === 'compose' || state.view === 'command') void refreshProfiles(); return; }
+    if (name === 'command') { const command = state.command || '/dispatch '; change({ view: 'command', command, cursor: { ...state.cursor, command: graphemes(command).length } }); updateSuggestions(); return; }
+    if (name === 'select') { if (state.view === 'board' || state.view === 'search') change({ selectedId: value, selectedTaskId: taskRows(state).find(row => row.agent?.id === value)?.id || state.selectedTaskId }); return; }
+    if (name === 'field') { if (state.view === 'compose') { if (value === 'projectKey') action('pick-project'); else if (state.field === value && value === 'provider') cycleChoice(1); else change({ field: value }); } return; }
+    if (name === 'refresh') { void monitor.refresh?.(); void refreshProfiles(); void session.refresh({ force: true }); return; }
     if (name === 'search') { change({ view: 'search', cursor: { ...state.cursor, search: graphemes(state.query).length } }); return; }
-    if (name === 'filter') { const filters = ['all', ...Object.keys(STATUS_LABELS)]; change({ filter: filters[(filters.indexOf(state.filter) + 1) % filters.length] }); return; }
+    if (name === 'filter') { const filters = ['all', ...Object.keys(state.boardView === 'tasks' ? TASK_LABELS : STATUS_LABELS)]; change({ filter: filters[(filters.indexOf(state.filter) + 1) % filters.length] }); return; }
     if (name === 'new') { change({ view: 'compose', field: state.draft.prompt ? 'prompt' : 'provider', confirmation: null }); return; }
-    if (name === 'cancel') { if (!state.busy) change({ view: 'board', confirmation: null }); return; }
+    if (name === 'cancel') { if (!state.busy) change({ view: ['picker', 'folder'].includes(state.view) ? 'compose' : 'board', confirmation: null }); return; }
     if (name === 'move') { moveSelection(value); return; }
     if (name === 'choice') { cycleChoice(value); return; }
     if (name === 'allow-launch') { if (!state.busy) change({ dispatchHold: false, resultTarget: null, notice: { kind: 'warning', message: 'Another launch is enabled. The preserved prompt will create a new agent.' } }); return; }
@@ -265,8 +294,33 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
     if (key.ctrl && input === 'r') { action('refresh'); return; }
     if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'y' && state.dispatchHold) { action('allow-launch'); return; }
     if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'f' && state.resultTarget) { action('focus-result'); return; }
+    if (state.view === 'decision') {
+      if (key.escape || input === 'n') action('decide', false);
+      else if (key.tab || key.leftArrow || key.rightArrow) change({ decision: { ...state.decision, confirm: !state.decision.confirm } });
+      else if (input === 'y') action('decide', true);
+      else if (key.return) action('decide', state.decision.confirm);
+      else if (key.downArrow || key.pageDown) action('decision-scroll', 1);
+      else if (key.upArrow || key.pageUp) action('decision-scroll', -1);
+      return;
+    }
+    if (state.view === 'picker') {
+      if (key.escape) action('cancel');
+      else if (key.return) chooseProject();
+      else if (key.downArrow || key.upArrow || key.tab) change({ pickerIndex: Math.max(0, Math.min(pickerItems().length - 1, state.pickerIndex + (key.upArrow || key.shift ? -1 : 1))) });
+      else edit(input, key);
+      return;
+    }
+    if (state.view === 'folder') {
+      if (key.escape) action('cancel');
+      else if (key.return) action('folder-submit');
+      else if (!state.folderLoading) edit(input, key);
+      return;
+    }
     if (state.view === 'command') {
-      if (key.escape) change({ view: 'board' });
+      if (key.escape && state.recallIndex !== null) { change({ command: state.recallDraft, recallIndex: null, cursor: { ...state.cursor, command: graphemes(state.recallDraft).length } }); updateSuggestions(); }
+      else if (key.escape) change({ view: 'board' });
+      else if (key.tab) { if (key.shift) change({ suggestionIndex: (state.suggestionIndex + 1) % Math.max(1, state.suggestions.length) }); else acceptSuggestion(); }
+      else if ((key.upArrow || key.downArrow) && recall(key.upArrow ? -1 : 1)) return;
       else if (key.return) submitCommand();
       else edit(input, key);
       return;
@@ -282,7 +336,8 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       if (key.escape) { action('cancel'); return; }
       if (key.ctrl && input === 's') { action('dispatch'); return; }
       if (key.tab) { cycleField(key.shift ? -1 : 1); return; }
-      if (['provider', 'workspaceId'].includes(state.field)) {
+      if (state.field === 'projectKey') { action('pick-project'); if (input && !key.return) edit(input, key); }
+      else if (state.field === 'provider') {
         if (key.leftArrow || key.upArrow) cycleChoice(-1);
         else if (key.rightArrow || key.downArrow || input === ' ') cycleChoice(1);
         else if (key.return) cycleField();
@@ -300,9 +355,20 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       else edit(input, key);
       return;
     }
+    if (state.view === 'detail') {
+      if (key.escape || key.leftArrow) action('cancel');
+      else if (key.downArrow || input === 'j' || key.pageDown) action('detail-scroll', 1);
+      else if (key.upArrow || input === 'k' || key.pageUp) action('detail-scroll', -1);
+      else if (key.return) action('focus');
+      else if (input === 'x') action('close');
+      else if (input === 'q') action('quit');
+      return;
+    }
     if (input === 'q') action('quit');
+    else if (input === 'g') action('board-toggle');
+    else if (key.rightArrow || input === 'd') action('details');
     else if (input === 'n') action('new');
-    else if (input.startsWith('/') && !key.ctrl && !key.meta) { change({ view: 'command', command: input, cursor: { ...state.cursor, command: graphemes(input).length } }); }
+    else if (input.startsWith('/') && !key.ctrl && !key.meta) { change({ view: 'command', command: input, cursor: { ...state.cursor, command: graphemes(input).length } }); updateSuggestions(); }
     else if (input === 's') action('search');
     else if (input === 'f') action('filter');
     else if (input === 'r') action('refresh');
@@ -312,17 +378,17 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
     else if (key.upArrow || input === 'k' || key.tab && key.shift) moveSelection(-1);
     else if (key.pageDown) moveSelection(5);
     else if (key.pageUp) moveSelection(-5);
-    else if (key.home) change({ selectedId: visibleAgents(state)[0]?.id || null });
-    else if (key.end) change({ selectedId: visibleAgents(state).at(-1)?.id || null });
+    else if (key.home) moveSelection(-Infinity);
+    else if (key.end) moveSelection(Infinity);
     else if (key.escape) change({ query: '', filter: 'all' });
   }
   const modelKey = key;
-  const ready = refreshProfiles();
+  const ready = Promise.all([refreshProfiles(), session.refresh()]);
   return { getSnapshot: () => state, subscribe: callback => { subscribers.add(callback); return () => subscribers.delete(callback); },
     action, key, paste: text => {
       if (state.busy) return;
-      if (state.view === 'board' && text.startsWith('/dispatch')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
-      else if (['compose', 'search', 'command'].includes(state.view)) edit(text, {}, true);
+      if (state.view === 'board' && text.startsWith('/')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
+      else if (['compose', 'search', 'command', 'picker', 'folder'].includes(state.view)) edit(text, {}, true);
     }, ready,
-    selected, targetBlock, destroy: () => { alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
+    selected, targetBlock, pickerItems, getTasks: session.getTasks, showNotice: inform, destroy: () => { session.destroy(); alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
 }

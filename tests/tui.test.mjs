@@ -6,6 +6,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { renderToString } from 'ink';
 import { createTuiModel, editText, parseMouse, hitTest, visibleAgents, parseDispatch } from '../src/tui-model.mjs';
 import { TuiView, startTui } from '../src/tui.mjs';
+import { createFakeRegistry, makeProject } from './helpers/dispatch-fakes.mjs';
 import { displayWidth } from '../src/terminal.mjs';
 
 function fixture() {
@@ -26,8 +27,16 @@ async function harness(overrides = {}) {
     closeAgent: async target => { calls.push(['close', target]); return { ok: true, state: 'closed', message: 'Closed.' }; },
     ...overrides,
   };
-  const model = createTuiModel({ monitor, controller, onQuit: () => calls.push(['quit']) });
+  const dispatch = controller.dispatch;
+  controller.dispatch = (request, { onProgress } = {}) => {
+    onProgress?.({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
+    return Promise.resolve(dispatch(request)).then(outcome => ({ ...outcome, taskId: request.taskId, attemptId: request.attemptId }));
+  };
+  const projects = ['app', 'docs'].map(name => makeProject({ key: `dir:/projects/${name}`, name, aliases: [], kind: 'folder', root: `/projects/${name}`, commonDir: null }));
+  const registry = createFakeRegistry({ projects });
+  const model = createTuiModel({ monitor, controller, registry, onQuit: () => calls.push(['quit']) });
   await model.ready;
+  model.action('board-toggle'); // Existing provider-board journeys explicitly select Agents.
   return { model, calls, publish(change) { snapshot = change(structuredClone(snapshot)); listener?.(snapshot); } };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -45,16 +54,21 @@ test('stable selection and draft survive refresh and Escape; paste never trigger
   assert.match(model.getSnapshot().draft.prompt, /not-a-command/);
 });
 
-test('dispatch captures selected provider/workspace/prompt and rejects duplicate pending submit', async t => {
+test('dispatch captures selected provider/project/prompt and rejects duplicate pending submit', async t => {
   let finish;
   const calls = [];
   const { model } = await harness({ dispatch: draft => { calls.push(draft); return new Promise(resolve => { finish = resolve; }); } }); t.after(model.destroy);
   model.action('new'); model.key('', { leftArrow: true });
-  model.action('field', 'workspaceId'); model.key('', { rightArrow: true });
+  model.action('field', 'projectKey'); model.key('', { downArrow: true }); model.key('', { return: true });
   model.action('field', 'prompt'); model.paste('First line\nSecond line');
   model.key('s', { ctrl: true }); model.key('s', { ctrl: true });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { provider: 'claude', workspaceId: 'w2', cwd: '/projects/docs', prompt: 'First line\nSecond line' });
+  assert.equal(calls[0].provider, 'claude');
+  assert.equal(calls[0].prompt, 'First line\nSecond line');
+  assert.equal(calls[0].inputTask, 'First line\nSecond line');
+  assert.deepEqual(calls[0].placement, { projectKey: 'dir:/projects/docs', root: '/projects/docs', mode: 'auto', subfolder: '', label: 'First line', placementStyle: 'tab' });
+  assert.match(calls[0].name, /claude$/);
+  assert(calls[0].taskId && calls[0].attemptId);
   finish({ ok: true, state: 'submitted', message: 'Sent.' }); await settle();
   assert.equal(model.getSnapshot().view, 'board');
   assert.equal(model.getSnapshot().draft.prompt, '');

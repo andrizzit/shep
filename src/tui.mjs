@@ -1,6 +1,7 @@
-import React, { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { render, Box, Text, useInput, usePaste, useWindowSize, measureElement } from 'ink';
 import { createTuiModel, visibleAgents, knownStatus, STATUS_LABELS, providerName, FIELDS, graphemes, parseMouse, hitTest, controlBlock } from './tui-model.mjs';
+import { taskGroups, taskRows, TASK_LABELS, displayArgs, summaryLabel } from './tui-tasks.mjs';
 import { safeText, displayWidth } from './terminal.mjs';
 
 export const TUI_COLORS = Object.freeze({ canvas: '#111b19', panel: '#172420', selected: '#293f34', border: '#465c4e', ink: '#eef2e8', muted: '#acb9ac', faint: '#829889', orange: '#f09365', working: '#e5c86e', blocked: '#f18b89', done: '#7fd3c7', idle: '#93cd95', unknown: '#a2aaa5' });
@@ -93,8 +94,71 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
       line(`${offset + 1}/${rows.length}`, { color: C.faint })) :
       line(rows.length > capacity ? `${offset + 1}–${Math.min(offset + capacity, rows.length)} of ${rows.length} rows · wheel / ↑↓` : 'Click to select · Enter to focus', { color: C.faint }));
 }
+export function boardRows(state) {
+  if (state.boardView !== 'tasks') return listRows(state);
+  return taskGroups(state).flatMap(group => [{ type: 'project', group }, ...group.rows.flatMap(row => [{ type: 'task', row }, { type: 'task-path', row }])]);
+}
+const taskColor = status => C[status] || (['failed', 'needs_input', 'needs_confirmation'].includes(status) ? C.blocked : C.working);
+const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000 ? '<1m' : milliseconds < 3600000 ? `${Math.floor(milliseconds / 60000)}m` : `${Math.floor(milliseconds / 3600000)}h`;
+function taskSubline(row) {
+  if (!row.task) return row.agent.workspace?.path || 'Path unavailable';
+  const task = row.task;
+  if (['done', 'idle'].includes(row.status) && task.summary) return summaryLabel(task.summary);
+  if (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(task.launch.state)) return task.launch.message;
+  if (task.placement) return task.placement.mode === 'worktree' ? `worktree ${task.created?.worktree?.branch || task.placement.cwd}` : `${task.placement.targetKind} · ${task.placement.cwd}`;
+  return task.launch.message;
+}
+function TaskList({ state, model, width, height, registry, offset = 0, compactActions = false }) {
+  const rows = boardRows(state);
+  const capacity = Math.max(1, height - 4);
+  return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
+    h(Box, { height: 1, flexShrink: 0, justifyContent: 'space-between' }, line('TASKS', { color: C.muted, bold: true }), line(`${taskRows(state).length} shown`, { color: C.faint })),
+    ...rows.slice(offset, offset + capacity).map(item => {
+      if (item.type === 'project') return line(`${item.group.name} (${item.group.rows.length})`, { key: `group-${item.group.key}`, color: C.orange, bold: true });
+      const row = item.row, active = row.id === state.selectedTaskId;
+      return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('select-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
+        item.type === 'task' ? h(Box, { width: '100%', justifyContent: 'space-between' },
+          h(Box, { flexGrow: 1, minWidth: 0 }, line(`${active ? '›' : ' '} ${row.label}`, { bold: active })),
+          line(` ${width > 65 ? providerName(row.task?.agent.provider || row.agent?.provider) + ' ' : ''}${TASK_LABELS[row.status] || 'Unknown'} ${elapsed(row.elapsedMs)}`, { color: taskColor(row.status) })) : line(`  ${taskSubline(row)}`, { color: active ? C.muted : C.faint }));
+    }),
+    !rows.length && line(state.projectsLoading ? 'Projects loading…' : state.query || state.filter !== 'all' ? 'No matching tasks.' : 'No tasks yet. /dispatch starts one.', { color: C.faint }),
+    h(Box, { flexGrow: 1 }),
+    compactActions ? h(Box, { gap: 0, flexShrink: 0 },
+      h(Button, { label: 'Focus ↵', registry, id: 'focus', action: () => model.action('focus') }),
+      h(Button, { label: 'Close x', registry, id: 'close', action: () => model.action('close') }),
+      h(Button, { label: 'Details →', registry, id: 'details', action: () => model.action('details') })) : line('g Agents · Click to select · Enter to focus', { color: C.faint }));
+}
+function TaskDetail({ state, model, width, height, registry }) {
+  const row = taskRows(state).find(item => item.id === state.selectedTaskId);
+  if (!row?.task) return h(Detail, { state, model, width, height, registry });
+  const task = row.task;
+  const content = [task.inputTask, '', `${providerName(task.agent.provider)} · ${TASK_LABELS[row.status]} · ${elapsed(row.elapsedMs)}`,
+    `Project: ${task.project.name}`, task.project.root, `Requested subfolder: ${task.subfolder || '(root)'}`,
+    `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Automatic · awaiting target'}`,
+    `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
+    ...(task.created?.worktree?.branch ? [`Branch: ${task.created.worktree.branch}`] : []),
+    `Launch: ${task.launch.state} · ${task.launch.message}`, `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`,
+    ...(task.locationNotice ? ['Location notice (exact):', task.locationNotice.event.message, `Full subfolder: ${task.locationNotice.subfolder}`] : []),
+    summaryLabel(task.summary), ...(task.summary?.message ? [task.summary.message] : [])];
+  const lines = content.flatMap(text => wrappedLines(text, Math.max(1, width - 4)));
+  const capacity = Math.max(1, height - 5);
+  const offset = Math.min(state.detailOffset, Math.max(0, lines.length - capacity));
+  return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, paddingX: 1, flexDirection: 'column', overflow: 'hidden' },
+    line(`TASK · ${task.name}`, { color: C.orange, bold: true }),
+    ...lines.slice(offset, offset + capacity).map((text, index) => line(text, { key: index, color: C.muted })),
+    h(Box, { flexGrow: 1 }),
+    h(Box, { gap: 0, flexShrink: 0 },
+      h(Button, { label: '↑', registry, id: 'detail-up', action: () => model.action('detail-scroll', -1) }),
+      h(Button, { label: '↓', registry, id: 'detail-down', action: () => model.action('detail-scroll', 1) }),
+      line(`${offset + 1}–${Math.min(offset + capacity, lines.length)}/${lines.length}`, { color: C.faint })),
+    h(Box, { gap: 0, flexShrink: 0 },
+      h(Button, { label: 'Focus ↵', registry, id: 'focus', action: () => model.action('focus') }),
+      h(Button, { label: 'Close x', registry, id: 'close', action: () => model.action('close') }),
+      h(Button, { label: 'Back Esc', registry, id: 'detail-back', action: () => model.action('cancel') })));
+}
+
 function Detail({ state, model, width, height, registry }) {
-  const agent = state.snapshot.agents.find(item => item.id === state.selectedId);
+  const agent = model.selected();
   const disabled = Boolean(controlBlock(state)) || state.view === 'command';
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
     line('SELECTED AGENT', { color: C.muted, bold: true }),
@@ -138,11 +202,11 @@ function editorLines(text, cursor, width, height) {
 }
 function Composer({ state, model, width, height, registry }) {
   const provider = state.profiles.providers.find(item => item.id === state.draft.provider);
-  const workspace = state.profiles.workspaces.find(item => item.id === state.draft.workspaceId);
+  const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   const narrow = height < (state.dispatchHold ? 26 : 23);
   const promptRows = Math.max(2, Math.min(7, height - 12));
   const blocked = controlBlock(state) || state.dispatchHold || !provider?.available || state.profilesLoading;
-  const title = name => ({ provider: 'Provider', name: 'Name (optional)', workspaceId: 'Workspace', cwd: 'Working directory', prompt: 'Prompt', dispatch: 'Launch' })[name];
+  const title = name => ({ provider: 'Provider', name: 'Name (optional)', projectKey: 'Project', subfolder: 'Subfolder (optional)', prompt: 'Task', dispatch: 'Launch' })[name];
   const renderField = field => {
     const active = state.field === field;
     const color = active ? C.orange : C.muted;
@@ -150,10 +214,10 @@ function Composer({ state, model, width, height, registry }) {
       h(Button, { label: state.busy === 'dispatch' ? 'Starting…' : 'Dispatch agent  Ctrl+S', registry, id: 'dispatch', active, disabled: Boolean(blocked), action: () => model.action('dispatch') }));
     let value;
     if (field === 'provider') value = `${provider?.name || 'Loading…'}${provider && !provider.available ? ' · unavailable' : ''}  ‹ ›`;
-    else if (field === 'workspaceId') value = `${workspace?.name || state.draft.workspaceId || 'Current workspace'}  ‹ ›`;
+    else if (field === 'projectKey') value = `${project?.name || (state.projectsLoading ? 'Projects loading…' : 'Choose a project')}  Enter / click`;
     else value = state.draft[field];
-    const fieldHeight = field === 'prompt' ? narrow ? Math.max(1, height - (state.dispatchHold ? 11 : 8)) : promptRows : 1;
-    const content = ['prompt', 'name', 'cwd'].includes(field) && active ? editorLines(value, state.cursor[field], Math.max(3, width - 6), fieldHeight) : field === 'prompt' ? value.split('\n').slice(0, fieldHeight).map(value => safeText(value)) : [safeText(value)];
+    const fieldHeight = field === 'prompt' ? narrow ? Math.max(1, height - (state.dispatchHold ? 12 : 9)) : promptRows : 1;
+    const content = ['prompt', 'name', 'subfolder'].includes(field) && active ? editorLines(value, state.cursor[field], Math.max(3, width - 6), fieldHeight) : field === 'prompt' ? value.split('\n').slice(0, fieldHeight).map(value => safeText(value)) : [safeText(value)];
     return h(Click, { key: field, registry, id: `field-${field}`, action: () => model.action('field', field), flexDirection: 'column', flexShrink: 0, minHeight: fieldHeight + 1 },
       line(`${active ? '›' : ' '} ${title(field)}${field === 'prompt' ? ' · Enter newline' : ''}`, { color, bold: active }),
       h(Box, { flexDirection: 'column', paddingX: 1, minHeight: fieldHeight, backgroundColor: active ? C.selected : C.panel },
@@ -161,9 +225,13 @@ function Composer({ state, model, width, height, registry }) {
   };
   const fields = narrow ? state.field === 'dispatch' ? ['dispatch'] : [state.field, 'dispatch'] : FIELDS;
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.orange, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
-    h(Box, { justifyContent: 'space-between', height: 1, flexShrink: 0 }, line('NEW AGENT', { color: C.orange, bold: true }), line(`${FIELDS.indexOf(state.field) + 1}/6`, { color: C.faint })),
-    line(state.profilesError || (narrow ? 'Tab: next field · draft stays on Esc' : 'Native Herdr session · auth remains in the agent pane'), { color: state.profilesError ? C.blocked : C.faint }),
+    h(Box, { justifyContent: 'space-between', height: 1, flexShrink: 0 }, line('NEW TASK', { color: C.orange, bold: true }), line(`${FIELDS.indexOf(state.field) + 1}/6`, { color: C.faint })),
+    line(state.profilesError || state.projectsError || (narrow ? 'Tab: next field · draft stays on Esc' : 'Automatic isolation · auth remains in the agent pane'), { color: state.profilesError ? C.blocked : C.faint }),
     ...fields.map(renderField),
+    narrow && h(Box, { gap: 1, flexShrink: 0 },
+      h(Button, { label: '‹ Prev', registry, id: 'field-prev', action: () => model.action('field-next', -1) }),
+      h(Button, { label: 'Next ›', registry, id: 'field-next', action: () => model.action('field-next', 1) }),
+      h(Button, { label: 'Back', registry, id: 'compose-back', action: () => model.action('cancel') })),
     h(Box, { flexGrow: 1 }),
     state.field === 'provider' && provider?.reason ? line(provider.reason, { color: provider.available ? C.faint : C.working }) :
       line(state.field === 'name' ? 'Name: a-z then a-z, 0-9, _ or -; max 32.' : state.field === 'prompt' ? `${Buffer.byteLength(state.draft.prompt)} / 65536 prompt bytes · paste supported` : controlBlock(state) || '←/→ choose · Tab next · Esc keeps draft', { color: C.faint }));
@@ -186,7 +254,69 @@ function Confirmation({ state, model, width, height, registry }) {
       h(Button, { label: 'Close agent  y', active: state.confirmClose, disabled: Boolean(reason), registry, id: 'confirm-close', action: () => model.action('confirm-close') })));
 }
 
-export function TuiView({ state, model, url = '', width = 100, height = 28, registry, offset = 0 }) {
+function wrappedLines(value, width) {
+  const lines = [''];
+  for (const glyph of graphemes(String(value))) {
+    if (glyph === '\n') { lines.push(''); continue; }
+    const text = safeText(glyph);
+    if (displayWidth(lines.at(-1) + text) > width) lines.push('');
+    lines[lines.length - 1] += text;
+  }
+  return lines;
+}
+function Decision({ state, model, width, height, registry }) {
+  const decision = state.decision;
+  const content = decision.kind === 'trust'
+    ? ['Trust this exact repository for Git operations?', decision.root, 'Only this canonical root is saved in Shep config. No global Git trust is changed.', decision.message]
+    : [`${providerName(decision.provider)} · configured default argv`, displayArgs(decision.args), decision.message, 'Consent lasts for this session and this exact argv only.'];
+  const lines = content.flatMap(value => wrappedLines(value, Math.max(1, width - 4)));
+  const capacity = Math.max(1, height - 5);
+  const offset = Math.min(decision.offset, Math.max(0, lines.length - capacity));
+  return h(Box, { width, height, borderStyle: 'round', borderColor: C.working, paddingX: 1, flexDirection: 'column', overflow: 'hidden' },
+    line(decision.kind === 'trust' ? 'TRUST REPOSITORY?' : 'CONFIGURED ARGUMENTS?', { color: C.working, bold: true }),
+    ...lines.slice(offset, offset + capacity).map((text, index) => line(text, { key: index, color: C.muted })),
+    h(Box, { flexGrow: 1 }),
+    h(Box, { gap: 1, flexShrink: 0 },
+      h(Button, { label: '↑', registry, id: 'decision-up', action: () => model.action('decision-scroll', -1) }),
+      h(Button, { label: '↓', registry, id: 'decision-down', action: () => model.action('decision-scroll', 1) }),
+      line(`${offset + 1}–${Math.min(offset + capacity, lines.length)}/${lines.length}`, { color: C.faint })),
+    h(Box, { gap: 1, flexShrink: 0 },
+      h(Button, { label: 'Cancel Esc', active: !decision.confirm, registry, id: 'decision-cancel', action: () => model.action('decide', false) }),
+      h(Button, { label: decision.kind === 'trust' ? 'Trust root y' : 'Use args y', active: decision.confirm, registry, id: 'decision-yes', action: () => model.action('decide', true) })));
+}
+function ProjectPicker({ state, model, width, height, registry }) {
+  const folder = state.view === 'folder';
+  const items = model.pickerItems();
+  const capacity = Math.max(1, height - 6);
+  const start = Math.max(0, state.pickerIndex - capacity + 1);
+  return h(Box, { width, height, borderStyle: 'round', borderColor: C.orange, paddingX: 1, flexDirection: 'column', overflow: 'hidden' },
+    line(folder ? 'OTHER FOLDER' : 'SELECT PROJECT', { color: C.orange, bold: true }),
+    line(folder ? 'Absolute path · session only' : state.projectsLoading ? 'Projects loading…' : 'Type to filter · ↑↓ select', { color: C.muted }),
+    line((folder ? state.folderPath : state.projectQuery) + '▏'),
+    ...(folder ? wrappedLines(state.folderPath, width - 4).slice(-capacity) : items.slice(start, start + capacity).map((item, index) => h(Click, {
+      key: item.key || item.root, registry, id: `project-${start + index}`, action: () => model.action('pick', start + index), height: 1, flexShrink: 0,
+      backgroundColor: start + index === state.pickerIndex ? C.selected : C.canvas }, line(`${start + index === state.pickerIndex ? '›' : ' '} ${item.name}  ${item.root} ${item.kind === 'trust_required' ? '(needs trust)' : item.kind ? `(${item.kind})` : ''}`)))).map((item, index) => typeof item === 'string' ? line(item, { key: index }) : item),
+    h(Box, { flexGrow: 1 }),
+    h(Box, { gap: 1, flexShrink: 0 },
+      h(Button, { label: 'Back Esc', registry, id: 'picker-back', action: () => model.action('cancel') }),
+      h(Button, { label: folder ? state.folderLoading ? 'Checking…' : 'Use folder ↵' : 'Select ↵', registry, id: 'picker-use', action: () => model.action(folder ? 'folder-submit' : 'pick', state.pickerIndex) })));
+}
+export function noticeLines(state, width) {
+  const required = state.requiredNotice;
+  if (!required) return [];
+  const exact = wrappedLines(required.event.message, Math.max(1, width - 2));
+  if (exact.length <= 3) return exact;
+  // Preserve the whole consequence. Only the separately labelled path elides;
+  // the exact event and full subfolder remain in the selected task detail.
+  return [...wrappedLines('Worktree starts at repository root;', Math.max(1, width - 2)), ...wrappedLines('selected subfolder is not applied', Math.max(1, width - 2)), truncate(`Path: ${required.subfolder}`, width - 2)];
+}
+function RequiredNotice({ state, width, onNoticeRendered }) {
+  const token = state.requiredNotice.token;
+  useLayoutEffect(() => { onNoticeRendered?.(token); }, [token, onNoticeRendered]);
+  return h(Box, { flexDirection: 'column', paddingX: 1, flexShrink: 0 }, ...noticeLines(state, width).map((text, index) => line(text, { key: index, color: C.working, bold: index === 0 })));
+}
+
+export function TuiView({ state, model, url = '', width = 100, height = 28, registry, offset = 0, onNoticeRendered }) {
   width = Math.max(1, width);
   height = Math.max(1, height);
   if (width < 39 || height < 14) return h(Box, { width, height, flexDirection: 'column', overflow: 'hidden' },
@@ -197,48 +327,51 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const short = height < 17;
   const status = health(state);
   const agents = state.snapshot.agents || [];
-  const headerHeight = compact ? 2 : 4;
-  const toolbarHeight = compact && ['compose', 'confirm'].includes(state.view) ? 0 : 4;
-  const footerHeight = 2;
-  const notificationHeight = state.dispatchHold ? 3 : 2;
+  const headerHeight = short ? 1 : compact ? 2 : 4;
+  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder'].includes(state.view) ? 0 : 3;
+  const footerHeight = short ? 1 : 2;
+  const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : state.dispatchHold ? 3 : 2;
   const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight);
   const split = width >= 90 && bodyHeight >= 12;
   const listWidth = split ? Math.floor(width * .52) : width;
   const rightWidth = width - listWidth;
-  const activePanel = state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : Detail;
+  const activePanel = state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
+  const List = state.boardView === 'tasks' ? TaskList : AgentList;
   const notice = state.notice?.message || (state.snapshot.source.state !== 'connected' ? `${state.snapshot.updatedAt ? 'Stale snapshot. ' : ''}${state.snapshot.source.message || 'Waiting for Herdr…'}` : state.snapshot.mode === 'demo' ? 'Sample agents only. Launch, focus and close are disabled.' : state.view === 'command' ? 'Use agent: to choose a provider; without a prefix, Codex runs the task. Enter submits.' : state.view === 'confirm' ? 'Review the captured identity. Cancel is selected by default.' : state.view === 'compose' ? 'Optional launch settings. Escape keeps your draft.' : 'Ready. Type /dispatch your task, or select an agent to focus its native pane.');
-  const footer = ['command', 'compose'].includes(state.view) && state.dispatchHold ? 'Ctrl+F focus pane · Ctrl+Y allow new · Esc back' : state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? '/ dispatch · ↑↓ select · Enter focus · x close · q quit' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n setup  s search  f filter  q quit';
-  const defaults = `Codex · ${state.profiles.workspaces.find(item => item.id === state.draft.workspaceId)?.name || 'Current workspace'} · ${state.draft.cwd || 'Reading launch settings…'}`;
-  const commandValue = state.command || '/dispatch [agent:] your task · default Codex';
+  const footer = ['command', 'compose'].includes(state.view) && state.dispatchHold ? 'Ctrl+F focus pane · Ctrl+Y allow new · Esc back' : state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n setup  s search  f filter  q quit';
+  const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
+  const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n Setup → Project'}`;
+  const commandValue = state.command || '/dispatch [agent][@project]: task · default Codex';
   const commandDisplay = state.view === 'command' ? editorLines(state.command, state.cursor.command, Math.max(4, width - 4), 1)[0] : commandValue;
   return h(Box, { width, height, flexDirection: 'column', backgroundColor: C.canvas, overflow: 'hidden' },
     h(Box, { height: headerHeight, flexShrink: 0, alignItems: compact ? 'flex-start' : 'center', gap: 1 },
       h(Dog, { compact }),
-      h(Box, { flexDirection: 'column', flexGrow: 1, minWidth: 0 }, line('shep.  Your agents, together.', { bold: true, color: C.orange }), line(`${agents.length} agents · ${agents.filter(agent => agent.status === 'working').length} working · ${agents.filter(agent => agent.status === 'blocked').length} need input`, { color: C.muted })),
+      h(Box, { flexDirection: 'column', flexGrow: 1, minWidth: 0 }, line('shep.  Your agents, together.', { bold: true, color: C.orange }), !short && line(`${agents.length} agents · ${agents.filter(agent => agent.status === 'working').length} working · ${agents.filter(agent => agent.status === 'blocked').length} need input`, { color: C.muted })),
       h(Box, { flexDirection: 'column', flexShrink: 0, maxWidth: Math.floor(width * .35) }, line(status.label, { color: status.color, bold: true }), !compact && line(state.snapshot.source.scope || 'Current Herdr session', { color: C.faint }))),
     toolbarHeight > 0 && h(Box, { height: toolbarHeight, flexShrink: 0, flexDirection: 'column' },
-      h(Box, { height: 1, flexShrink: 0, gap: 1 },
-        h(Button, { label: 'n Setup', registry, id: 'new', disabled: state.view === 'command', action: () => model.action('new') }),
-        h(Button, { label: `f ${state.filter === 'all' ? 'All agents' : STATUS_LABELS[state.filter]}`, registry, id: 'filter', disabled: state.view === 'command', action: () => model.action('filter') }),
+      h(Box, { height: 1, flexShrink: 0, gap: 0 },
+        h(Button, { label: short ? 'n New' : 'n Setup', registry, id: 'new', disabled: state.view === 'command', action: () => model.action('new') }),
+        h(Button, { label: `g ${state.boardView === 'tasks' ? 'Agents' : 'Tasks'}`, registry, id: 'board-toggle', action: () => model.action('board-toggle') }),
+        h(Button, { label: `f ${state.filter === 'all' ? 'All' : TASK_LABELS[state.filter]}`, registry, id: 'filter', disabled: state.view === 'command', action: () => model.action('filter') }),
         h(Click, { registry, id: 'search', action: () => model.action('search'), flexGrow: 1, minWidth: 0 }, line(`s ${state.query}${state.view === 'search' ? '▏' : state.query ? '' : 'Search'}`, { color: state.view === 'search' ? C.orange : C.muted }))),
       line(`Default: ${defaults}`, { color: C.muted }),
       h(Click, { registry, id: 'command', action: () => model.action('command'), height: 1, flexShrink: 0, backgroundColor: state.view === 'command' ? C.selected : C.panel }, line(`› ${commandDisplay}`, { color: state.view === 'command' ? C.ink : C.orange }))),
     h(Box, { height: bodyHeight, flexShrink: 0 },
       split ? h(React.Fragment, null,
-        h(AgentList, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
+        h(List, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
-        state.view === 'compose' || state.view === 'confirm' ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(AgentList, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
-    h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
+        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
+    state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
       h(Box, { height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(notice, width * 2 - 4))),
       state.dispatchHold && h(Box, { gap: 1, flexShrink: 0 },
         h(Button, { label: 'Allow new launch', registry, id: 'notice-allow', action: () => model.action('allow-launch') }),
         state.resultTarget && h(Button, { label: 'Focus pane', registry, id: 'notice-focus', action: () => model.action('focus-result') }))),
     h(Box, { height: footerHeight, flexDirection: 'column', flexShrink: 0 },
       line(footer, { color: C.muted }),
-      h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint }))));
+      !short && h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint }))));
 }
 
-function App({ model, url, output, registry }) {
+function App({ model, url, output, registry, onNoticeRendered }) {
   const state = useSyncExternalStore(model.subscribe, model.getSnapshot, model.getSnapshot);
   const size = useWindowSize();
   // Leave the final physical cell unused: Ink's incremental repaint appends
@@ -247,14 +380,14 @@ function App({ model, url, output, registry }) {
   const width = Math.max(1, Math.min(300, (size.columns || output.columns || 100) - 1));
   const height = Math.max(1, Math.min(120, (size.rows || output.rows || 28) - 1));
   const [offset, setOffset] = useState(0);
-  const rows = listRows(state);
+  const rows = boardRows(state);
   const header = height < 25 ? 2 : 4;
   const capacity = Math.max(1, height - header - (state.dispatchHold ? 13 : 12));
   const maxOffset = Math.max(0, rows.length - capacity);
-  const selectedRow = rows.findIndex(row => row.type === 'agent' && row.agent.id === state.selectedId);
+  const selectedRow = rows.findIndex(row => row.type === 'agent' && row.agent.id === state.selectedId || row.type === 'task' && row.row.id === state.selectedTaskId);
   useEffect(() => {
     setOffset(previous => Math.max(0, Math.min(maxOffset, selectedRow < previous ? selectedRow : selectedRow + Math.min(2, capacity) > previous + capacity ? selectedRow + Math.min(2, capacity) - capacity : previous)));
-  }, [state.selectedId, selectedRow, capacity, maxOffset]);
+  }, [state.selectedId, state.selectedTaskId, selectedRow, capacity, maxOffset]);
   useInput((input, key) => {
     if (width < 39 || height < 14) { if (input === 'q' || key.ctrl && ['c', 'd'].includes(input)) model.action('quit'); return; }
     const mouse = parseMouse(input);
@@ -269,28 +402,41 @@ function App({ model, url, output, registry }) {
     model.key(input, key);
   });
   usePaste(text => model.paste(text));
-  return h(TuiView, { state, model, url, width, height, registry, offset: Math.min(offset, maxOffset) });
+  return h(TuiView, { state, model, url, width, height, registry, offset: Math.min(offset, maxOffset), onNoticeRendered });
 }
 
-export function startTui({ monitor, controller, url = '', onQuit, input = process.stdin, output = process.stdout }) {
+export function startTui({ monitor, controller, registry: projects, getConfig, reloadConfig, addTrustedRepo, summarize, url = '', onQuit, input = process.stdin, output = process.stdout }) {
   if (!input.isTTY || !output.isTTY) throw new Error('The Ink interface requires a terminal. Use the plain terminal fallback for redirected output.');
   const registry = new Map();
-  const model = createTuiModel({ monitor, controller, onQuit });
   let instance;
   let stopped = false;
+  let renderedNotice = null;
+  let outputError = null;
+  const outputFailed = error => { outputError = error; };
+  output.on('error', outputFailed);
+  const model = createTuiModel({ monitor, controller, registry: projects, getConfig, reloadConfig, addTrustedRepo, summarize, onQuit,
+    acknowledgeNotice: async (token, signal) => {
+      if (!instance || stopped || signal.aborted || output.destroyed || outputError) throw new Error('The terminal cannot display the required location notice.');
+      await instance.waitUntilRenderFlush();
+      if (stopped || signal.aborted || output.destroyed || outputError || renderedNotice !== token) throw new Error('The required location notice was not flushed for this task.');
+    } });
   const priorRaw = Boolean(input.isRaw);
   const stop = () => {
     if (stopped) return;
     stopped = true;
     model.destroy();
     registry.clear();
+    output.off('error', outputFailed);
     try { output.write(MOUSE_OFF); } catch { /* Output may have already closed. */ }
     try { instance?.cleanup(); } finally {
       try { if (Boolean(input.isRaw) !== priorRaw) input.setRawMode(priorRaw); } catch { /* Detached input. */ }
     }
   };
   try {
-    instance = render(h(App, { model, url, output, registry }), { stdin: input, stdout: output, stderr: output, exitOnCtrlC: false, patchConsole: false, alternateScreen: true, interactive: true, incrementalRendering: true, maxFps: 30 });
+    // Tasks/Agents replace sibling Yoga trees. Ink's incremental cache can
+    // retain erased rows across that swap; full repaint keeps borders/hitboxes
+    // aligned while the frame remains bounded by the terminal dimensions.
+    instance = render(h(App, { model, url, output, registry, onNoticeRendered: token => { renderedNotice = token; } }), { stdin: input, stdout: output, stderr: output, exitOnCtrlC: false, patchConsole: false, alternateScreen: true, interactive: true, incrementalRendering: false, maxFps: 30 });
     output.write(MOUSE_ON);
     instance.waitUntilExit().then(() => { if (!stopped) { stop(); onQuit?.(); } }, error => {
       stop();
@@ -301,5 +447,7 @@ export function startTui({ monitor, controller, url = '', onQuit, input = proces
   } catch (error) { stop(); throw error; }
   stop.ready = Promise.all([model.ready, instance.waitUntilRenderFlush()]);
   stop.waitUntilRenderFlush = () => instance.waitUntilRenderFlush();
+  stop.getTasks = model.getTasks;
+  stop.showNotice = model.showNotice;
   return stop;
 }
