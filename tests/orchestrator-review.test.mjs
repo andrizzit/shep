@@ -121,36 +121,57 @@ async function transportFixture() {
   const directory = await mkdtemp(join(temporary, 'pty-host-'));
   const statePath = join(directory, 'state.json');
   const logPath = join(directory, 'calls.jsonl');
+  const scenarioPath = join(directory, 'scenario.json');
+  const startupRelease = join(directory, 'startup-release');
   const binary = join(directory, 'controlled-herdr');
+  const projectPath = join(directory, 'project');
+  const externalPath = join(directory, 'external');
+  await Promise.all([mkdir(projectPath), mkdir(externalPath)]);
   const raw = controllerFixture().raw;
-  raw.result.snapshot.panes[0].cwd = directory;
-  raw.result.snapshot.workspaces.forEach(workspace => {
-    workspace.active_tab_id = workspace.workspace_id === 'w1' ? 'w1:t1' : 'w2:t1';
-    workspace.worktree.checkout_path = directory;
-  });
+  raw.result.snapshot.workspaces.forEach((workspace, index) => Object.assign(workspace, {
+    number: index + 1, active_tab_id: workspace.workspace_id + ':t1', worktree: null,
+    pane_count: index === 0 ? 1 : 2, tab_count: 1, agent_status: 'unknown', focused: index === 0,
+  }));
+  raw.result.snapshot.tabs.forEach((tab, index) => Object.assign(tab, {
+    number: 1, label: 'Existing tab', pane_count: index === 0 ? 1 : 2, agent_status: 'unknown', focused: index === 0,
+  }));
   raw.result.snapshot.agents = [
-    plainAgent({ agent: 'claude', name: 'alpha-fixture', agent_status: 'blocked', terminal_id: 'alpha-terminal' }),
-    plainAgent({ agent: 'codex', name: 'beta-fixture', agent_status: 'done', pane_id: 'w2:p3', terminal_id: 'beta-terminal' }),
+    plainAgent({ agent: 'claude', name: 'alpha-fixture', agent_status: 'blocked', terminal_id: 'alpha-terminal', cwd: externalPath }),
+    plainAgent({ agent: 'codex', name: 'beta-fixture', agent_status: 'done', pane_id: 'w2:p3', terminal_id: 'beta-terminal', cwd: externalPath }),
   ];
   raw.result.snapshot.panes[1].terminal_id = 'alpha-terminal';
   raw.result.snapshot.panes.push({ ...otherPane, pane_id: 'w2:p3', terminal_id: 'beta-terminal' });
-  await atomicJson(statePath, { snapshot: raw.result.snapshot, nextPane: 9, holdStart: false });
-  await writeFile(logPath, '');
+  raw.result.snapshot.panes.forEach((pane, index) => Object.assign(pane, {
+    cwd: index === 0 ? projectPath : externalPath, foreground_cwd: index === 0 ? projectPath : externalPath,
+    focused: index === 0, revision: 0, scroll: { max_offset_from_bottom: 0, offset_from_bottom: 0, viewport_rows: 40 },
+  }));
+  await atomicJson(statePath, { version: 1, snapshot: raw.result.snapshot, nextId: 9, uses: {}, worktrees: [], scaffolding: [], holdStart: false });
+  await atomicJson(scenarioPath, { version: 1, steps: [{ id: 'first-start', match: { prefix: ['agent', 'start'] },
+    effect: 'default', barrierPath: startupRelease, barrierTimeoutMs: 30000 }] });
+  await Promise.all([writeFile(logPath, ''), writeFile(startupRelease, 'released\n')]);
   await writeFile(binary, '#!/usr/bin/env node\n(' + fakeHerdrMain.toString() + ')();\n', { mode: 0o755 });
   const env = await isolatedFixtureEnvironment(directory);
   Object.assign(env, {
     HERDR_ENV: '1', HERDR_BIN_PATH: binary, HERDR_SOCKET_PATH: join(directory, 'current.sock'),
     HERDR_PANE_ID: ownPane.pane_id, HERDR_TAB_ID: ownPane.tab_id, HERDR_WORKSPACE_ID: ownPane.workspace_id,
-    PATH: executables + delimiter + (env.PATH || ''), ORCHESTRATOR_QA_STATE: statePath, ORCHESTRATOR_QA_LOG: logPath,
+    PATH: executables + delimiter + (env.PATH || ''), SHEP_TEST_MODE: 'scripted', SHEP_TEST_SCENARIO: scenarioPath,
+    SHEP_TEST_DISPATCH_BINARY: join(project, 'tests', 'fixtures', 'fake-herdr.cjs'),
+    SHEP_TEST_STATE: statePath, SHEP_TEST_LOG: logPath,
     TERM: 'xterm-256color', FORCE_COLOR: '1', CI: '' });
   delete env.NO_COLOR;
+  const configPath = join(env.XDG_CONFIG_HOME, 'shep', 'config.json');
+  await mkdir(join(env.XDG_CONFIG_HOME, 'shep'));
+  await atomicJson(configPath, { projects: { entries: [{ name: 'fixture', path: projectPath }] } });
   return {
-    directory, env, statePath,
-    configPath: join(env.XDG_CONFIG_HOME, 'shep', 'config.json'),
+    directory, env, statePath, scenarioPath, projectPath, externalPath, configPath,
     historyPath: join(env.XDG_STATE_HOME, 'shep', 'history.jsonl'),
     calls: async () => (await readFile(logPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
     readState: async () => JSON.parse(await readFile(statePath, 'utf8')),
-    setState: value => atomicJson(statePath, value),
+    setState: async value => {
+      if (value.holdStart) await rm(startupRelease, { force: true });
+      else await writeFile(startupRelease, 'released\n');
+      await atomicJson(statePath, value);
+    },
   };
 }
 
@@ -666,7 +687,7 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
     assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, index, 'Pasting must not dispatch');
     pty.send('\r');
     if (index === 0) {
-      await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'created-9'), 'Created agent was not recorded before pending start');
+      await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'fixture-terminal-9'), 'Created agent was not recorded before pending start');
       pty.send('\r');
       await delay(60);
       assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'start').length, 1, 'Duplicate Enter launched twice');
@@ -689,7 +710,7 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
   assert.equal(exit.rawRestored, true);
   for (const sequence of ['\x1b[?1000l', '\x1b[?1006l', '\x1b[?1049l']) assert.ok(pty.output().includes(sequence), 'Missing terminal cleanup sequence');
   await assert.rejects(fetch('http://127.0.0.1:' + pty.port + '/api/snapshot'));
-  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'created-9'), 'Quitting must preserve created agents');
+  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'fixture-terminal-9'), 'Quitting must preserve created agents');
 });
 
 test('orchestrator QA: quitting installed Ink during pending startup exits promptly and never sends the prompt', { timeout: 30000 }, async t => {
@@ -699,7 +720,7 @@ test('orchestrator QA: quitting installed Ink during pending startup exits promp
   pty.send('\x1b[200~/dispatch keep this fixture pending\x1b[201~');
   await delay(70);
   pty.send('\r');
-  await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'created-9'), 'Pending startup was not entered');
+  await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'fixture-terminal-9'), 'Pending startup was not entered');
   const started = Date.now();
   pty.send('\x03');
   const exit = await waitFor(() => pty.exited(), 'Quit hung on the pending Herdr startup', 4500);
@@ -708,7 +729,7 @@ test('orchestrator QA: quitting installed Ink during pending startup exits promp
   assert.equal(exit.rawRestored, true);
   const commands = await fixture.calls();
   assert.equal(commands.some(({ args }) => ['prompt', 'close'].includes(args[1])), false);
-  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'created-9'));
+  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'fixture-terminal-9'));
   for (const sequence of ['\x1b[?1000l', '\x1b[?1006l', '\x1b[?1049l']) assert.ok(pty.output().includes(sequence));
 });
 
