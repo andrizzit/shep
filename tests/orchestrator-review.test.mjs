@@ -218,7 +218,14 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
       child.stdin.write(JSON.stringify({ type: 'resize', columns, rows }) + '\n');
     },
   };
-  await waitFor(() => pty.screen().includes('YOUR AGENTS'), 'Installed Ink app did not render: ' + errorOutput);
+  await waitFor(() => {
+    const output = pty.output();
+    // PTY data is chunked: the board title can arrive before the rest of its
+    // frame and the mouse setup written immediately after Ink's first render.
+    return output.includes('\x1b[?1000h') && output.includes('\x1b[?1006h')
+      && output.lastIndexOf('\x1b[?2026l') > output.lastIndexOf('\x1b[?2026h')
+      && pty.screen().includes('YOUR AGENTS');
+  }, 'Installed Ink app did not finish startup: ' + errorOutput);
   return pty;
 }
 
