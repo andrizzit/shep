@@ -1,8 +1,8 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.3.0, the Ink terminal interface inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.1, the local project-aware dispatch preview inside Herdr.
 
-**Checked:** September 24, 2026, against the implementation and installed command.
+**Scope:** Single-agent dispatch, project targeting, automatic placement, a task board, notifications and change summaries. Later fan-out, templates, named profiles, persisted history, in-Shep follow-ups and cleanup controls are deferred.
 
 **Purpose:** Start coding agents, monitor their work, respond when they need input, review results, and close finished agent panes.
 
@@ -38,37 +38,48 @@ Shep shows agents across all workspaces in the current Herdr instance. It does n
 
 Use at least a 40-column by 15-row terminal pane. A larger pane is more comfortable for reading paths and viewing the selected agent beside the list.
 
-**Expected result:** a live provider-grouped overview, a command input, and the correct default project directory.
+**Expected result:** a live overview with Tasks/Agents views, a command input, and the correct default project directory.
+
+### Configure projects once
+
+Discovery roots start empty. Add this one-line config to `~/.config/shep/config.json` (or `$XDG_CONFIG_HOME/shep/config.json`) to discover projects under GitProjects:
+
+```json
+{"projects":{"roots":["~/Documents/DevLearning/GitProjects"]}}
+```
+
+Create the containing folder if needed. If a config already exists, merge the projects section rather than replacing other settings. Restart Shep or reload from its composer after editing. Shep also discovers projects from open workspaces. Use the project picker or **Other folder…** for an existing directory outside those sources. Shep does not write discovery roots on your behalf.
 
 ## 3. Dispatch a task
 
 In Shep, type one command and press **Enter**:
 
 ```text
-/dispatch claude: fix the ledger
+/dispatch claude@folio: fix the ledger
 ```
 
 Other examples:
 
 ```text
-/dispatch grok: write the docker compose file
-/dispatch codex: add a regression test for the settings page
+/dispatch codex@shep: add a regression test for the settings page
+/dispatch claude: review the current project
 /dispatch fix the settings page
 ```
 
 The syntax is:
 
 ```text
-/dispatch [provider:] task description
+/dispatch [provider][@project[/subfolder]]: task description
+/dispatch task description
 ```
 
 The brackets indicate an optional part; do not type the brackets.
 
 | Command form | Selected provider |
 | --- | --- |
-| `/dispatch claude: your task` | Claude |
-| `/dispatch grok: your task` | Grok |
-| `/dispatch codex: your task` | Codex |
+| `/dispatch claude@folio: your task` | Claude in the folio project |
+| `/dispatch codex@shep: your task` | Codex in the shep project |
+| `/dispatch claude: your task` | Claude in the context project |
 | `/dispatch kiro: your task` | Kiro, when installed |
 | `/dispatch your task` | **Always Codex** |
 
@@ -80,11 +91,15 @@ When your task itself starts with a colon label, make the provider explicit to a
 /dispatch codex: Bug: saving settings resets the selected theme
 ```
 
-Each accepted dispatch creates a **new agent in a new Herdr pane**. It does not send a follow-up to the selected existing agent. By default, Shep splits its current pane in the same tab, choosing a direction based on available space and preserving your focus. Choosing another existing workspace in setup places the new pane in that workspace's active tab.
+Each accepted dispatch creates a **new agent in its own Herdr tab**, reusing the project's main workspace or creating a new workspace if none is open. Your Shep pane and focus stay in place. It does not send a follow-up to an existing agent.
+
+When another agent is working in the same Git checkout, Shep uses a new worktree. Herdr starts a worktree's agent at its repository root. If you requested a subfolder, both the preview and a notice before launch explain that it will not apply. Inspect the actual working directory and branch in the task detail. Automatic placement relies on Herdr's current state; it is not a guarantee that another process will never edit the same files.
+
+If Git rejects a repository for dubious ownership, Shep can ask you to trust that exact canonical root. Cancel is the default. Confirmation is saved in Shep's config and applies only to that repository. Agent authentication and provider trust dialogs still require your attention in the created pane.
 
 Shep starts the provider through Herdr, checks readiness, and submits the prompt. Wait for the result message before issuing another dispatch. Once submission completes, you can dispatch another task while the first agent continues working.
 
-**Expected result:** a “Prompt submitted” message with a pane ID, followed by the new agent in its provider group. Submission confirms delivery; inspect subsequent status and output to confirm the agent actually worked on the task.
+**Expected result:** a submitted task with a pane ID in the Tasks view, plus the agent in its provider group. Submission confirms delivery; inspect subsequent status and output to confirm the agent actually worked on the task. Tab accepts a command/provider/project suggestion; Enter submits. Up/Down recalls single-line commands from this run.
 
 ## 4. Write a useful task
 
@@ -100,22 +115,22 @@ For review work:
 /dispatch claude: Review the current ledger changes for correctness. Do not edit files. Report actionable findings with file locations and explain any remaining uncertainty.
 ```
 
-Agents launched into the same directory share the same working tree. Shep does not create a separate branch or worktree for each dispatch. Give concurrent implementation tasks distinct file ownership, or select separately prepared working directories when you need isolation.
+Shep automatically isolates a Git checkout when another agent is working there. If several people or tools may edit files independently of Herdr's status, coordinate file ownership as well. A non-Git folder cannot gain Git worktree isolation.
 
-## 5. Change the workspace, directory, or launch details
+## 5. Choose a project or write a longer prompt
 
 1. Return to the overview with **Esc** if you are editing a command.
 2. Press **n** to open setup and the optional composer.
 3. Move between fields with **Tab** or **Shift+Tab**.
-4. Use **Left/Right** to change the provider or workspace.
-5. Set the working directory to an **existing absolute path**. Verify it after changing workspace; Shep may populate that workspace's directory.
-6. Press **Esc** to return to the overview when you only want to change the settings. The edited workspace and directory remain selected for the current run.
+4. Select the provider and open the project picker. Filter the list, choose a project, or choose **Other folder…** and enter an existing absolute path.
+5. Set an optional subfolder and task name. Check the placement preview and working directory.
+6. Press **Esc** to retain your draft and return to the overview.
 
-The composer fields are provider, optional name, workspace, working directory, prompt, and launch action. For a longer prompt, type or paste into the **Prompt** field. **Enter adds a newline there**; **Ctrl+S** submits the composer. You can also select its Dispatch button.
+The composer offers one provider, project, optional subfolder/name, prompt and launch action. For a longer prompt, type or paste into the **Prompt** field. **Enter adds a newline there**; **Ctrl+S** submits the composer. You can also select its Dispatch button.
 
 A custom agent name must be unique among live agents, begin with a lowercase letter, and use only lowercase letters, digits, `_`, or `-`, up to 32 characters. Leave it empty for an automatically generated name.
 
-The provider chosen in the composer applies to composer launches. A slash command without a prefix still uses **Codex**, and slash commands generate a new name automatically. Workspace and directory choices apply to both launch methods.
+The provider chosen in the composer applies to composer launches. A slash command without a prefix still uses **Codex**. Generated names describe the task; an explicit `@project` targets that project. Nonempty configured default provider arguments require confirmation before first use; named profiles are not part of this checkpoint.
 
 Settings and drafts last for the current Shep process. Esc keeps an unfinished draft; quitting Shep discards it. To resume a retained slash-command draft, click its command bar. Typing a new `/` from the overview starts a new command.
 
@@ -123,7 +138,7 @@ Prompts are limited to 64 KiB of UTF-8 text. Normal bracketed terminal paste pre
 
 ## 6. Monitor progress
 
-Agents are grouped by provider, including Claude, Codex, Grok, and Kiro. The list shows status and workspace information; the selected-agent panel shows more detail, including its pane and terminal identity.
+Press **g** to switch views. Tasks are grouped by project and show this run's dispatches, outcomes and changes. Agents are grouped by provider and include agents started outside Shep. Select a row for its detail and actions. Use **n** to compose a new task; re-run shortcuts are deferred. Tasks are not restored after restarting; native agents remain visible in Agents.
 
 | Status | Color | Meaning and next action |
 | --- | --- | --- |
@@ -134,6 +149,8 @@ Agents are grouped by provider, including Claude, Codex, Grok, and Kiro. The lis
 | Unknown | Gray | Herdr cannot confidently classify the state. Inspect the pane before deciding what to do. |
 
 The overview refreshes roughly every two seconds. Press **r** from the overview to request a refresh. Shep displays Herdr's state; it does not independently judge whether a coding task is correct.
+
+By default, Herdr notifies you when a Shep task finishes or needs input while you are viewing something else. Startup state is treated as a baseline, and an initially idle agent is not completion evidence. Notifications do not include unrelated external agents by default. Add `"notifications":{"enabled":false}` to your config to disable them, or `"notifications":{"sound":false}` for silent alerts. Configuration is never changed automatically.
 
 Focusing an agent marks its completion seen, so **Done can become Idle**. Reading the overview does not do this. A Herdr client's own completion badge can also differ because clients track what has been viewed.
 
@@ -179,7 +196,7 @@ If pane creation itself was uncertain, inspect Herdr for an extra pane before re
 
 ## 9. Review and close a finished agent
 
-1. Select the completed agent and focus its pane.
+1. Select the completed task to inspect its Git change summary, then focus its agent pane. The summary reports file/change counts and commits from the captured base where available; it is not a code review.
 2. Read its final response, relevant changes, and test results.
 3. Ask a follow-up in that pane if work remains.
 4. Once you are finished with the agent, return to Shep and select it again.
@@ -188,7 +205,7 @@ If pane creation itself was uncertain, inspect Herdr for an extra pane before re
 7. Press **y** or click **Close agent** to confirm. Press **Esc** to cancel. The initial keyboard choice is Cancel.
 8. Confirm the agent disappears from Shep and its Herdr pane closes.
 
-Closing ends the pane's process. It does not revert files that the agent already changed or automatically commit its work. Keep any output you need before closing.
+Closing ends the selected pane's process. The **x** action also works for agents that Shep did not launch, with the same identity checks and default-Cancel confirmation. It does not revert files, commit work, delete branches, or clean up worktrees. Keep any output you need before closing. Worktree cleanup controls are deferred.
 
 If the target or its status changed while the dialog was open, Shep can refuse the close. Cancel, inspect the current agent, and start a new confirmation. A Done or Idle status is a cue to review; Shep does not automatically close agents.
 
@@ -204,13 +221,15 @@ Reopen from a shell inside Herdr:
 shep
 ```
 
-The new instance discovers the agents still running. Previous prompt drafts, search state, and setup choices are not restored. Check the default directory again.
+The new instance discovers the agents still running. Task records, command recall, prompt drafts, search state, and setup choices are not restored. This checkpoint neither reads nor writes a history file. Check the default directory again.
 
 **Ctrl+C acts on the focused application.** Use it in the Shep pane when your intention is to stop Shep; in an agent pane it goes to that agent.
 
 ## 11. Use the browser companion or demo
 
 While normal Shep is running, open [http://localhost:4317](http://localhost:4317). The browser offers a read-only view of the same snapshot, with search and filters. Agent dispatch, focus, and close are performed from the TUI.
+
+The browser receives ordinary Herdr metadata, including task-derived names, labels and paths. It never receives task records, prompts, expanded templates, history, launch arguments or config. Avoid secrets in task titles. Agent tools and Herdr keep their own data according to their settings.
 
 To serve only the browser dashboard, run this from a Herdr shell:
 
@@ -269,10 +288,10 @@ Use discovered IDs rather than assuming that example pane numbers refer to your 
 | Port 4317 is already in use | Use the existing Shep instance, quit it before reopening, or intentionally launch another instance with `shep --port 4319`. |
 | A provider is unavailable | Install that provider's CLI and make it available on PATH. Reopen Shep after changing the shell environment. Installation and authentication are separate requirements. |
 | Wrong agent receives the task | Check the `provider:` syntax. No prefix always selects Codex; a composer provider choice does not change that rule. |
-| Agent starts in the wrong folder | Press n, check the selected workspace, then set and verify the absolute working directory. Launching Shep from a subdirectory initially uses that directory. |
+| Agent starts in the wrong folder | Press n and check the project, subfolder and placement preview. Worktrees always start at repository root; the preview and pre-launch notice explain this. |
 | Invalid or missing directory | Enter an existing absolute directory in setup. Create the directory separately if it does not exist. |
 | Stale/disconnected data | The retained list is the last successful snapshot. Check `herdr status` in another shell, restore the connection, then press r. Agent controls remain disabled until connected. |
-| Settings fail to load or a workspace disappeared | Open setup and press Ctrl+R to refresh the launch catalog, then select a current workspace. Reopen Shep if its invoking pane/session changed. |
+| Settings fail to load or a workspace disappeared | Open setup and press Ctrl+R to reload configuration and discovery. Invalid settings produce a notice and use defaults for the affected section. Reopen Shep if its invoking pane/session changed. |
 | A dispatched agent is missing from the list | Clear search/filter with Esc from the overview and press r. Inspect the reported pane directly if startup is still awaiting authentication or detection. |
 | “Too small or zoomed” when dispatching | Enlarge or unzoom the target area in Herdr, or close completed panes after review. Then retry only if no pane was already created. |
 | “Enlarge this pane” | Give Shep at least 40 columns and 15 rows; more space improves readability. |
@@ -287,23 +306,23 @@ Use discovered IDs rather than assuming that example pane numbers refer to your 
 
 The normal daily workflow needs only `shep`. Use this section when installing on another machine or updating the installed copy.
 
-Requirements are Herdr 0.9.1 or newer and Node.js 22 or newer with npm. The actual runtime was verified on macOS with Node.js 26.7.0 and Herdr 0.9.1; Linux and Node.js 22 remain unverified support targets. Each provider needs its own CLI and authentication.
+Requirements are Herdr 0.9.1 or newer and Node.js 22.23.2 or newer with npm. Automated verification covers Node.js 22.23.2 and 26.7.0 on macOS; Linux is unverified. Each provider needs its own CLI and authentication.
 
-For a fresh source checkout, use the default `main` branch:
+For a fresh source checkout:
 
 ```sh
 git clone https://github.com/andrizzit/shep.git
 cd shep
 ```
 
-For an existing checkout, confirm the branch with `git branch --show-current` and inspect `git status` before pulling. If it is clean and already on `main`, update with `git pull --ff-only`. Preserve local changes before changing branches or updating.
+The checkpoint is a local, unpublished preview on `feat/smart-dispatch`; cloning public main does not obtain unpushed work. Build the reviewed feature checkout or use its reviewed tarball. For any source update, inspect `git status` and preserve local changes first.
 
 Quit the running Shep process, then build and install from the source directory:
 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.3.0.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.1.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 
@@ -327,7 +346,7 @@ Then reopen Shep in the desired Herdr pane. No npm registry release is required 
 
 1. Open the existing Shep pane, or launch `shep` from the intended project directory.
 2. Confirm LIVE, workspace, and working directory.
-3. Enter `/dispatch provider: task`, or omit the prefix for Codex.
+3. Enter `/dispatch provider@project: task`, or omit the prefix for Codex in the context project.
 4. Wait for the submission result; use the overview to track work.
 5. Focus agents needing input and answer in their own panes.
 6. Review completed output and verification results before closing agents.

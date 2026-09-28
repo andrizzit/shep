@@ -5,7 +5,9 @@
 <h1 align="center">Shep</h1>
 <p align="center"><strong>Your agents, together.</strong></p>
 
-Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, choose Claude, Codex, Grok, or another supported tool, enter a prompt, and launch it in a native Herdr pane. Keep a grouped overview of every agent’s status, workspace, and working directory, then focus or close agents from the same interface.
+Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
+
+This branch provides **0.4.0-checkpoint.1**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, follow-ups from Shep, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show the same data from your current Herdr instance.
 
@@ -17,7 +19,10 @@ For the full daily workflow, read the [Shep operating procedure](docs/SOP.md): d
 
 ## What Shep does
 
-- Dispatches your prompt to a selected installed agent, in an existing Herdr workspace and directory.
+- Dispatches a literal prompt into its own Herdr tab, reusing the project's workspace or creating one.
+- Uses a separate Git worktree when another agent is working in that checkout, with a visible placement preview and notice.
+- Offers a project picker, command suggestions and command recall for the current run.
+- Groups tasks by project, shows Git change summaries and sends Herdr notifications when a task finishes or needs input.
 - Groups agents by provider, including Claude, Codex, Grok, Kiro, and additional types reported by Herdr.
 - Lets you select agents with arrow keys or a mouse, focus their real panes, and confirm closing them.
 - Shows which agents are working, waiting for input, done, idle, or unknown.
@@ -34,11 +39,11 @@ Shep is a coordinator, not another AI model. It sends the prompt you write to th
 | Requirement | Details |
 | --- | --- |
 | Herdr | Version 0.9.1 or newer, with a running session |
-| Node.js | Version 22 or newer, with `node` and `npm` on your PATH |
+| Node.js | Version 22.23.2 or newer, with `node` and `npm` on your PATH |
 | Operating system | macOS or Linux |
-| Git | Needed to clone this repository |
+| Git | Needed for repository discovery, change summaries and worktree isolation |
 
-Current verification was performed on macOS with Node.js 26.7.0 and Herdr 0.9.1. Linux and the Node.js 22 minimum are support targets that have not yet been verified on those runtimes.
+Automated checks cover Node.js 22.23.2 and 26.7.0 on macOS; native integration targets Herdr 0.9.1. Linux has not been verified.
 
 **Run Shep inside a Herdr pane.** It can start from any folder in that pane. A regular terminal outside Herdr cannot start the dashboard; `shep --help` and `shep --version` work anywhere.
 
@@ -51,12 +56,14 @@ git clone https://github.com/andrizzit/shep.git
 cd shep
 ```
 
+The public default branch may still be 0.3.0 while this preview is unpushed. To build the checkpoint, use its reviewed `feat/smart-dispatch` checkout or the supplied checkpoint tarball; do not expect a fresh clone to contain local work.
+
 ### 2. Build and install the local package
 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.3.0.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.1.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -90,14 +97,16 @@ shep
 Type a command in Shep and press **Enter**:
 
 ```text
-/dispatch codex: add voice input to shep
-/dispatch claude: review the authentication flow
-/dispatch grok: investigate this bug
+/dispatch claude@folio: add unit tests for the ledger
+/dispatch codex@shep: fix the settings page
+/dispatch review the current changes
 ```
 
-The `provider:` prefix is optional. `/dispatch add voice input to shep` always uses **Codex**, even after a command sent to Claude or Grok. No flags are needed. An unknown or unavailable provider produces an error; Shep never silently substitutes another tool. Your workspace and directory choices apply to subsequent commands during the current run.
+The `provider:` and `@project` parts are optional. `/dispatch your task` always uses **Codex** in the context project; `/dispatch claude: your task` keeps working. Use `/dispatch claude@folio/src/api: your task` to request a project subfolder. Unknown or unavailable providers and ambiguous projects produce an error before launch. **Tab** accepts a suggestion; **Enter** submits the command. Up/Down recalls commands from this run.
 
-Press **n** for optional launch settings: provider, unique name, existing workspace, working directory, and a multiline prompt. Use **Tab** to move between fields. Authentication and trust questions appear in the newly created agent pane; Shep keeps that pane available and reports when attention is needed.
+Press **n** for the composer: provider, project or **Other folder…**, subfolder, optional name and multiline prompt. Use **Tab** to move between fields. Review the proposed location before dispatch. Herdr starts a worktree at its repository root; when a requested subfolder cannot apply, Shep shows that notice before launch. Authentication and agent dialogs stay in the agent's pane and are never answered by Shep.
+
+Press **g** to switch between Tasks grouped by project and Agents grouped by provider. Tasks and drafts last only for this run. After restarting, still-running agents appear in the Agents view.
 
 Use **↑/↓** to select an agent and **Enter** to focus its actual Herdr pane. Mouse clicks select agents; the Focus and Close buttons act on that selection. **x** opens a close confirmation. Closing an agent ends that pane’s process; it is separate from quitting Shep, which leaves all agents running.
 
@@ -106,6 +115,18 @@ While Shep is running, open [localhost:4317](http://localhost:4317) for the read
 - **Close:** press `q` outside editors, or press `Ctrl+C` at any time.
 - **Reopen:** run `shep` again in the pane.
 - **Agents:** continue running when Shep closes.
+
+### Enable project discovery
+
+Open `~/.config/shep/config.json` (or `$XDG_CONFIG_HOME/shep/config.json`) and add a projects section. For example, this is a complete one-line config for projects in `~/Documents/DevLearning/GitProjects`:
+
+```json
+{"projects":{"roots":["~/Documents/DevLearning/GitProjects"]}}
+```
+
+If the file already contains settings, merge this section into it instead of replacing the file. Restart Shep or reload configuration from the composer. Discovery roots default to empty. Open workspaces also contribute projects; the picker offers **Other folder…** for an existing folder outside your registered projects. Configured roots are scanned with bounds, not recursively without limit.
+
+Shep only persists a configuration change when you explicitly confirm trust for an exact repository. It never trusts every repository or answers an agent's trust dialog. To turn off notifications, add `"notifications":{"enabled":false}` to your config; `"sound":false` keeps them silent. Notifications cover Shep tasks by default and suppress alerts for an agent you are already viewing.
 
 ![Shep terminal board with sample agents](docs/images/shep-terminal.png)
 
@@ -131,10 +152,11 @@ While Shep is running, open [localhost:4317](http://localhost:4317) for the read
 | --- | --- |
 | `↑` / `↓` or `k` / `j` | Select an agent |
 | `Enter` | Focus the selected agent’s actual Herdr pane |
-| `/` | Enter `/dispatch [provider:] your task`; press Enter to launch |
+| `/` | Enter `/dispatch [provider][@project]: your task`; press Enter to launch |
+| `g` | Switch Tasks / Agents |
 | `n` | Open optional launch settings and multiline composer |
 | `Tab` / `Shift+Tab` | Move between composer fields |
-| `←` / `→` | Change provider or workspace selection |
+| `←` / `→` | Change the selected composer option |
 | `Ctrl+S` | Submit the composer |
 | `s` | Search agents and workspaces |
 | `f` | Cycle status filters |
@@ -197,7 +219,9 @@ Controls are disabled when the view is stale/disconnected or showing demo data. 
 
 ## Local data and privacy
 
-Shep reads agent identity, status, pane/workspace metadata, and working directories through `herdr api snapshot`. It keeps snapshots and prompt drafts in memory and does not save them on disk. It does not collect credentials or transmit data to a hosted service of its own. On dispatch, your selected agent receives the prompt and applies its own data and provider settings.
+Shep reads agent identity, status, pane/workspace metadata, and working directories through `herdr api snapshot`, and uses local Git metadata for project discovery, placement and change summaries. Task records, command recall and drafts stay in memory; this checkpoint does not create or read a history file. Repository trust confirmations are saved in Shep's local config. Shep does not collect credentials or transmit data to a hosted service of its own. On dispatch, your selected agent receives the prompt and applies its own data and provider settings.
+
+The read-only `/api/snapshot` endpoint publishes ordinary Herdr metadata, which may include task-derived agent names, tab/workspace labels and paths. It never includes task records, prompts, expanded templates, history, launch arguments or config. Names and labels summarize tasks, so avoid putting secrets into task titles. Native Herdr and agent tools retain their own data according to their settings.
 
 The browser server binds to `127.0.0.1` and serves only the dashboard assets and the snapshot endpoint. Other local processes and users with access to your machine may be able to read this dashboard. Host/Origin checks restrict browser requests; the Herdr environment check is host integration, not authentication against deliberately forged environment variables.
 
