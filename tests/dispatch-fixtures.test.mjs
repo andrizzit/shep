@@ -85,9 +85,9 @@ test('D0 deferred controller correlates attempts and preserves target notices be
   const firstResult = controller.dispatch(first, { onProgress: event => events.push(event) });
   const secondResult = controller.dispatch(second, { onProgress: () => { throw new Error('Synthetic observer error'); } });
   const message = "Worktree starts at the repository root; subfolder src/api isn't applied";
-  assert.equal(controller.emit(first, 'target', { placement: { mode: 'worktree', reason: 'forced' }, message }), true);
-  assert.throws(() => controller.emit(first, 'target', { taskId: 'different-task' }), /Unknown fixture progress/);
-  assert.throws(() => controller.emit(first, 'prompt', { message }), /target progress/);
+  assert.equal(await controller.emit(first, 'target', { placement: { mode: 'worktree', reason: 'forced' }, message }), true);
+  await assert.rejects(controller.emit(first, 'target', { taskId: 'different-task' }), /Unknown fixture progress/);
+  await assert.rejects(controller.emit(first, 'prompt', { message }), /target progress/);
   assert.throws(() => controller.settle(first, { taskId: 'different-task' }), /attempt identity/);
   controller.settle(second, { ok: false, state: 'needs_confirmation', message: 'Synthetic trust confirmation.' });
   assert.equal((await secondResult).attemptId, second.attemptId);
@@ -95,7 +95,7 @@ test('D0 deferred controller correlates attempts and preserves target notices be
   assert.equal(events.at(-1).attemptId, first.attemptId);
   controller.settle(first);
   assert.equal((await firstResult).state, 'submitted');
-  assert.equal(controller.emit(second, 'prompt'), false, 'Completed attempt must not emit later progress');
+  assert.equal(await controller.emit(second, 'prompt'), false, 'Completed attempt must not emit later progress');
   controller.dispose();
 });
 
@@ -103,13 +103,66 @@ test('D0 fake disposal settles queued and in-progress jobs without later action 
   const controller = createFakeController();
   const queued = { taskId: 'queued', attemptId: 'a' }; const active = { taskId: 'active', attemptId: 'a' };
   const q = controller.dispatch(queued); const a = controller.dispatch(active);
-  controller.emit(active, 'start'); controller.dispose();
+  await controller.emit(active, 'start'); controller.dispose();
   assert.equal((await q).state, 'failed'); assert.equal((await a).state, 'uncertain');
   const before = controller.calls.length;
   await assert.rejects(controller.closeAgent({ paneId: 'w1:p2' }), /disposed/);
   await controller.notify({ title: 'ignored after disposal' });
-  assert.equal(controller.emit(active, 'prompt'), false);
+  assert.equal(await controller.emit(active, 'prompt'), false);
   assert.equal(controller.calls.length, before);
+});
+
+const requiredNotice = { placement: { mode: 'worktree', reason: 'Explicit worktree' }, noticeRequired: true,
+  message: "Worktree starts at the repository root; subfolder src/api isn't applied" };
+
+test('D0 required target notice waits for acknowledgement before fixture progress can advance', async () => {
+  const controller = createFakeController(); const flush = deferred();
+  const request = { taskId: 'notice-task', attemptId: 'notice-attempt' };
+  const result = controller.dispatch(request, { onProgress: event => event.noticeRequired ? flush.promise : undefined });
+  const acknowledgement = controller.emit(request, 'target', requiredNotice);
+  await assert.rejects(controller.emit(request, 'start'), /Await the required notice/);
+  assert.throws(() => controller.settle(request), /Await the required notice/);
+  assert.deepEqual(controller.calls.map(item => item.method), ['dispatch']);
+  flush.resolve(); assert.equal(await acknowledgement, true);
+  assert.equal(await controller.emit(request, 'start'), true);
+  controller.settle(request);
+  assert.equal((await result).state, 'submitted');
+  controller.dispose();
+});
+
+test('D0 failed or disposed required notices cannot advance; ordinary observer failures remain nonfatal', async () => {
+  for (const kind of ['missing', 'rejected', 'timeout', 'disposed']) {
+    const controller = createFakeController({ noticeTimeoutMs: 20 });
+    const flush = deferred();
+    const request = { taskId: `notice-${kind}`, attemptId: 'attempt' };
+    const onProgress = kind === 'missing' ? undefined : event => {
+      if (!event.noticeRequired) return;
+      return kind === 'rejected' ? Promise.reject(new Error('Synthetic failed flush')) : flush.promise;
+    };
+    const result = controller.dispatch(request, { onProgress });
+    const acknowledgement = controller.emit(request, 'target', requiredNotice);
+    if (kind === 'disposed') controller.dispose();
+    assert.equal(await acknowledgement, false, kind);
+    const outcome = await result;
+    assert.equal(outcome.state, 'failed', kind);
+    assert.equal(outcome.code, kind === 'disposed' ? 'disposed' : 'prelaunch_notice_failed', kind);
+    if (kind !== 'disposed') {
+      assert.equal(outcome.stage, 'target');
+      assert.equal(outcome.message, 'The worktree location notice could not be displayed. No launch was started.');
+      assert.equal(Object.hasOwn(outcome, 'created'), false);
+    }
+    flush.resolve();
+    assert.equal(await controller.emit(request, 'start'), false, kind);
+    assert.deepEqual(controller.calls.map(item => item.method), ['dispatch'], kind);
+    controller.dispose();
+  }
+  const controller = createFakeController();
+  const request = { taskId: 'ordinary-notice', attemptId: 'attempt' };
+  const result = controller.dispatch(request, { onProgress: async () => { throw new Error('Non-required observer'); } });
+  assert.equal(await controller.emit(request, 'target', { placement: { mode: 'here', reason: 'Default' } }), true);
+  controller.settle(request);
+  assert.equal((await result).state, 'submitted');
+  controller.dispose();
 });
 
 test('D0 registry and private controller snapshots do not expose mutable fixture state', async () => {

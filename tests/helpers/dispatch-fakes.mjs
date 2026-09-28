@@ -72,10 +72,12 @@ export function createFakeRegistry({ projects = [makeProject()], trustRequired =
   };
 }
 
-export function createFakeController({ profiles, controlSnapshot, now = () => SYNTHETIC_AT } = {}) {
+export function createFakeController({ profiles, controlSnapshot, noticeTimeoutMs = 1500, now = () => SYNTHETIC_AT } = {}) {
+  if (!(noticeTimeoutMs > 0 && noticeTimeoutMs <= 1500)) throw new TypeError('Fixture notice timeout must be within 1500ms');
   const calls = [];
   const pending = new Map();
   const listeners = new Set();
+  const lifetime = new AbortController();
   let disposed = false;
   const profileValue = profiles ?? {
     providers: ['claude', 'codex', 'grok', 'kiro'].map(id => ({ id, name: id[0].toUpperCase() + id.slice(1), available: true })),
@@ -94,20 +96,55 @@ export function createFakeController({ profiles, controlSnapshot, now = () => SY
     if (disposed) throw new Error('Fixture controller is disposed');
     calls.push({ method, request: copy(request) });
   }
-  function emit(request, stage, details = {}) {
+  function observe(fn, event) {
+    try { Promise.resolve(fn?.(copy(event))).catch(() => {}); } catch { /* Non-required observers cannot abort a launch. */ }
+  }
+  function acknowledge(job, event) {
+    if (typeof job.onProgress !== 'function') return Promise.resolve('failed');
+    return new Promise(resolve => {
+      let complete = false;
+      const finish = result => {
+        if (complete) return;
+        complete = true; clearTimeout(timer);
+        lifetime.signal.removeEventListener('abort', abort);
+        resolve(result);
+      };
+      const abort = () => finish('disposed');
+      const timer = setTimeout(() => finish('failed'), noticeTimeoutMs);
+      lifetime.signal.addEventListener('abort', abort, { once: true });
+      if (lifetime.signal.aborted) return abort();
+      try { Promise.resolve(job.onProgress(copy(event))).then(() => finish('ok'), () => finish('failed')); }
+      catch { finish('failed'); }
+    });
+  }
+  async function emit(request, stage, details = {}) {
     if (!PROGRESS_STAGES.includes(stage)) throw new TypeError('Unknown fixture progress stage');
     const job = pending.get(keyFor(request));
     if (!job || disposed) return false;
+    if (job.noticePending) throw new TypeError('Await the required notice before advancing this fixture attempt');
     if (Object.keys(details).length && stage !== 'target') throw new TypeError('Placement notice belongs to target progress');
-    if (Object.keys(details).some(key => !['placement', 'message'].includes(key))) throw new TypeError('Unknown fixture progress detail');
+    if (Object.keys(details).some(key => !['placement', 'message', 'noticeRequired'].includes(key))) throw new TypeError('Unknown fixture progress detail');
     if (details.message !== undefined && typeof details.message !== 'string') throw new TypeError('Fixture notice must be text');
     if (details.placement !== undefined && (!details.placement || !['here', 'worktree'].includes(details.placement.mode)
       || typeof details.placement.reason !== 'string'
       || Object.keys(details.placement).some(key => !['mode', 'reason'].includes(key)))) throw new TypeError('Invalid fixture target placement');
+    if (details.noticeRequired !== undefined && (details.noticeRequired !== true || details.placement?.mode !== 'worktree'
+      || !details.message?.trim())) throw new TypeError('A required notice needs a worktree target and nonempty message');
     const event = { taskId: request.taskId, attemptId: request.attemptId, stage, at: now(), ...copy(details) };
     job.stage = stage;
-    try { job.onProgress?.(copy(event)); } catch { /* UI failures cannot abort a native launch. */ }
-    for (const fn of listeners) { try { fn(copy(event)); } catch { /* Independent observer. */ } }
+    if (details.noticeRequired) {
+      job.noticePending = true;
+      const result = await acknowledge(job, event);
+      job.noticePending = false;
+      if (disposed || pending.get(keyFor(request)) !== job) return false;
+      if (result !== 'ok') {
+        pending.delete(keyFor(request));
+        job.gate.resolve(outcome(request, { ok: false, state: 'failed', stage: 'target', code: 'prelaunch_notice_failed',
+          message: 'The worktree location notice could not be displayed. No launch was started.' }));
+        return false;
+      }
+    } else observe(job.onProgress, event);
+    for (const fn of listeners) observe(fn, event);
     return true;
   }
   return {
@@ -122,13 +159,14 @@ export function createFakeController({ profiles, controlSnapshot, now = () => SY
       record('dispatch', request);
       const gate = deferred();
       pending.set(keyFor(request), { request: copy(request), onProgress, gate });
-      emit(request, 'queued');
+      void emit(request, 'queued');
       return gate.promise;
     },
     emit,
     settle(request, value = { ok: true, state: 'submitted', message: 'Synthetic prompt submitted.' }) {
       const job = pending.get(keyFor(request));
       if (!job) throw new TypeError('No pending fixture attempt');
+      if (job.noticePending) throw new TypeError('Await the required notice before settling this fixture attempt');
       const result = outcome(job.request, value);
       pending.delete(keyFor(request));
       job.gate.resolve(result);
@@ -143,7 +181,8 @@ export function createFakeController({ profiles, controlSnapshot, now = () => SY
     dismissTask(request) { record('dismissTask', request); return { ok: true, state: 'dismissed', message: 'Synthetic local dismissal.' }; },
     dispose() {
       disposed = true;
-      for (const job of pending.values()) job.gate.resolve(outcome(job.request, { ok: false, state: job.stage === 'queued' ? 'failed' : 'uncertain', code: 'disposed', message: 'Fixture stopped; created resources kept.' }));
+      lifetime.abort();
+      for (const job of pending.values()) job.gate.resolve(outcome(job.request, { ok: false, state: job.stage === 'queued' || job.noticePending ? 'failed' : 'uncertain', code: 'disposed', message: 'Fixture stopped; created resources kept.' }));
       pending.clear(); listeners.clear();
     },
   };

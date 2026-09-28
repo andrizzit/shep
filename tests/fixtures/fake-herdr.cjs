@@ -36,8 +36,8 @@ if (dispatcherModes.has(mode)) {
   }));
 }
 
-// D0 synthetic schema-shaped host. The worktree trust refusal copies the observed
-// Herdr 0.9.1 envelope; fixture_ errors and success policy remain provisional until G0.
+// Controlled scenarios are synthetic. Native Herdr 0.9.1 qualification is recorded
+// in SPIKE_FACTS and the spike evidence; fixture_ errors are explicitly invented.
 // Scenario v1: {snapshot?, worktreeSource?, steps:[{id?, match:argv|{prefix:argv},
 // times?, effect?:'default', snapshot?, result?, error?, stdout?, exitCode?,
 // signalPath?, barrierPath?, barrierTimeoutMs?, delayMs?}]}.
