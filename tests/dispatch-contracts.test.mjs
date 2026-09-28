@@ -18,7 +18,7 @@ const vectors = JSON.parse(await readFile(process.env.SHEP_CONTRACT_FIXTURE
 const project = vectors.context.projects[0];
 const at = '2026-09-27T12:00:00.000Z';
 const placement = { projectKey: project.key, root: project.root, mode: 'auto', subfolder: '', label: 'Fixture task', placementStyle: 'tab' };
-const request = { taskId: 'task-1', attemptId: 'attempt-1', provider: 'codex', prompt: 'Fixture task', name: 'fixture-task-codex', args: [], placement };
+const request = { taskId: 'task-1', attemptId: 'attempt-1', provider: 'codex', prompt: 'Fixture task', inputTask: 'Fixture task', name: 'fixture-task-codex', args: [], placement };
 const result = { ok: true, state: 'submitted', message: 'Fixture submitted.', taskId: 'task-1', attemptId: 'attempt-1', paneId: 'w2:p1', terminalId: 'terminal-2',
   placement: { mode: 'here', targetKind: 'workspace', reason: 'No project workspace open', cwd: project.root, workspaceId: 'w2', notices: [] },
   created: { workspaceId: 'w2', tabId: 'w2:t1', tabIds: ['w2:t1'], panes: [{ paneId: 'w2:p1', terminalId: 'terminal-2', tabId: 'w2:t1', workspaceId: 'w2' }] } };
@@ -122,6 +122,17 @@ test('D0 validation: modern placement intent requires attempt IDs and legacy spl
   }
   assert.ok(validateDispatchRequest({ ...request, placement: { ...placement, subfolder: '../escape' } }).length);
   assert.deepEqual(validateDispatchRequest({ ...request, placement: { ...placement, subfolder: 'src/api', mode: 'wt' } }), []);
+});
+
+test('Contract change 001: original naming input is required only for modern requests', () => {
+  const modern = { ...request, inputTask: 'Please\nimplement foo', prompt: 'Template: Please\nimplement foo', name: 'custom-name' };
+  assert.deepEqual(validateDispatchRequest(modern), []);
+  assert.equal(modern.prompt, 'Template: Please\nimplement foo');
+  for (const inputTask of [undefined, '', ' ', 'bad\x1btext', '🙂'.repeat(16385)]) {
+    assert.ok(validateDispatchRequest({ ...modern, inputTask }).some(issue => issue.path === 'inputTask'));
+  }
+  assert.deepEqual(validateDispatchRequest({ provider: 'codex', prompt: 'Literal legacy task', cwd: '/fixture' }), []);
+  assert.deepEqual(validateDispatchRequest({ provider: 'codex', prompt: 'Literal legacy task', cwd: '/fixture', inputTask: '\x1b' }), []);
 });
 
 test('D0 config schema: defaults, nested errors and warning-only unknown keys', () => {
