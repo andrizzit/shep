@@ -10,7 +10,7 @@ function freeze(value) {
   return value;
 }
 
-export const CONTRACT_REVISION = '1';
+export const CONTRACT_REVISION = '2';
 export const SPIKE_FACTS = freeze({
   herdrVersion: '0.9.1', protocol: 22, schemaVersion: 1,
   evidence: { live: ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'], ownerConfirmed: ['S8'], documentedOnly: ['S9'] },
@@ -329,6 +329,7 @@ export const VALIDATION_PROBLEMS = freeze({
  * @property {string} attemptId Different for a confirmed trust retry, same taskId.
  * @property {string} provider
  * @property {string} prompt Final expanded task; one literal argv entry, delivered at most once.
+ * @property {string} inputTask Original unexpanded task, required for modern placement requests; used for naming only, never sent in place of prompt.
  * @property {string} name
  * @property {string[]} [args]
  * @property {PlacementIntent} placement Resolved from fresh private snapshot inside project lock.
@@ -732,6 +733,7 @@ export function validateDispatchRequest(request, { allowLegacy = true } = {}) {
     if (request.cwd !== undefined) add(errors, validPath(request.cwd), 'cwd', 'invalid_cwd', VALIDATION_PROBLEMS.absolutePath);
     if (request.workspaceId !== undefined) add(errors, nonempty(request.workspaceId), 'workspaceId', 'workspace_missing', 'must identify a workspace');
   } else {
+    add(errors, validatePrompt(request.inputTask).length === 0, 'inputTask', 'invalid_request', 'must preserve original task text for naming');
     for (const key of ['taskId', 'attemptId']) add(errors, nonempty(request[key]), key, 'invalid_request', 'must be a nonempty ID');
     errors.push(...prefixed(validatePlacementIntent(request.placement), 'placement'));
   }
