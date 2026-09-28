@@ -9,7 +9,7 @@ Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dis
 
 This branch provides **0.4.0-checkpoint.1**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, follow-ups from Shep, worktree cleanup controls and additional shell subcommands are deferred.
 
-Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show the same data from your current Herdr instance.
+Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
 For the full daily workflow, read the [Shep operating procedure](docs/SOP.md): dispatch, monitoring, follow-ups, closing agents, recovery, and updates.
 

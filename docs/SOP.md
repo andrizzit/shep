@@ -126,7 +126,7 @@ Shep automatically isolates a Git checkout when another agent is working there. 
 5. Set an optional subfolder and task name. Check the placement preview and working directory.
 6. Press **Esc** to retain your draft and return to the overview.
 
-The composer offers one provider, project, optional subfolder/name, prompt and launch action. For a longer prompt, type or paste into the **Prompt** field. **Enter adds a newline there**; **Ctrl+S** submits the composer. You can also select its Dispatch button.
+The composer offers one provider, project, optional subfolder/name, task and launch action. For a longer prompt, type or paste into the **Task** field. **Enter adds a newline there**; **Ctrl+S** submits the composer. You can also select its Dispatch button.
 
 A custom agent name must be unique among live agents, begin with a lowercase letter, and use only lowercase letters, digits, `_`, or `-`, up to 32 characters. Leave it empty for an automatically generated name.
 
