@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createController } from '../src/control.mjs';
+import { makeRepo } from './helpers/git-fixtures.mjs';
 import { getHerdrContext, normalizeSnapshot } from '../src/herdr.mjs';
 
 const execute = promisify(execFile);
@@ -235,13 +236,20 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
     cwd: fixture.directory, env: fixture.env, stdio: ['pipe', 'pipe', 'pipe'],
   });
   let pending = '', transcript = '', errorOutput = '', exit;
+  const frames = [];
   child.stdout.on('data', chunk => {
     pending += chunk;
     let newline;
     while ((newline = pending.indexOf('\n')) >= 0) {
       const event = JSON.parse(pending.slice(0, newline));
       pending = pending.slice(newline + 1);
-      if (event.event === 'data') transcript += event.text;
+      if (event.event === 'data') {
+        transcript += event.text;
+        if (event.text.includes('\x1b[?2026l') && transcript.lastIndexOf('\x1b[?2026l') > transcript.lastIndexOf('\x1b[?2026h')) {
+          frames.push(terminalScreen(transcript, columns, rows));
+          if (frames.length > 1000) frames.shift();
+        }
+      }
       if (event.event === 'exit') exit = event;
     }
   });
@@ -253,7 +261,7 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
   });
   const pty = {
-    port, output: () => transcript, errors: () => errorOutput, exited: () => exit,
+    port, output: () => transcript, frames: () => [...frames], errors: () => errorOutput, exited: () => exit,
     send: value => child.stdin.write(JSON.stringify({ type: 'input', value }) + '\n'),
     screen: () => terminalScreen(transcript, columns, rows),
     resize: (nextColumns, nextRows) => {
@@ -768,4 +776,156 @@ test('orchestrator QA: installed NO_COLOR layout fits exact terminal width and c
   assert.equal(exit.code, 0, pty.errors());
   assert.equal(exit.rawRestored, true);
   assert.equal((await fixture.calls()).some(({ args }) => ['close', 'focus', 'split', 'start', 'prompt'].includes(args[1])), false);
+});
+
+// Checkpoint acceptance uses the actual installed CLI, project registry and
+// modern controller path. Only Herdr is replaced by the frozen native-shaped
+// transport; the synthetic folders never refer to an owner's repository.
+test('checkpoint QA: installed targeting uses tabs and new workspaces, not split fallback, and keeps private state off the browser', { timeout: 90000 }, async t => {
+  const fixture = await transportFixture();
+  const remoteProject = join(fixture.directory, 'remote-project');
+  await mkdir(remoteProject);
+  const config = { projects: { entries: [
+    { name: 'fixture', path: fixture.projectPath }, { name: 'remote', path: remoteProject },
+  ] }, templates: { privatefixture: 'PRIVATE_CONFIG_SENTINEL {task}' } };
+  await atomicJson(fixture.configPath, config);
+  const originalConfig = await readFile(fixture.configPath, 'utf8');
+  const pty = await startInstalledPty(t, fixture);
+  assert.ok(pty.screen().includes('TASKS'), 'The checkpoint must start on its Tasks board');
+  await waitFor(() => pty.screen().includes('Codex · fixture') && !pty.screen().includes('Projects loading'), 'The configured context project was not resolved');
+  const before = await fixture.readState();
+  const ownTab = structuredClone(before.snapshot.tabs.find(tab => tab.tab_id === ownPane.tab_id));
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'notification'), false, 'Existing blocked/done agents must not trigger startup notifications');
+
+  const prompts = [
+    'Verify the literal targeted checkpoint request carefully\nPRIVATE_PROMPT_SENTINEL $(no-shell); --flag',
+    'Default provider stays Codex',
+    ...Array.from({ length: 8 }, (_, index) => `Sequential tab acceptance ${index + 3}`),
+  ];
+  for (const [index, prompt] of prompts.entries()) {
+    const command = index === 0 ? '/dispatch claude@fixture: ' + prompt : '/dispatch ' + prompt;
+    pty.send('\x1b[200~' + command + '\x1b[201~');
+    await delay(50);
+    assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, index, 'Paste alone must not send work');
+    pty.send('\r');
+    await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === index + 1, 'A sequential modern dispatch did not deliver once');
+    await waitFor(() => pty.screen().includes('Prompt submitted'), 'The modern task outcome was not rendered');
+    const calls = await fixture.calls();
+    const start = calls.filter(({ args }) => args[1] === 'start')[index].args;
+    const submitted = calls.filter(({ args }) => args[1] === 'prompt')[index].args;
+    assert.equal(start[start.indexOf('--kind') + 1], index === 0 ? 'claude' : 'codex');
+    assert.equal(submitted[3], prompt);
+    assert.match(start[2], /^[a-z][a-z0-9_-]{0,31}$/);
+  }
+  const tabCalls = (await fixture.calls()).filter(({ args }) => args[0] === 'tab' && args[1] === 'create');
+  assert.equal(tabCalls.length, 10, 'Every same-project dispatch must create a tab');
+  for (const { args } of tabCalls) {
+    assert.equal(args[args.indexOf('--workspace') + 1], 'w1');
+    assert.ok(args.includes('--no-focus'));
+  }
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'pane' && args[1] === 'split'), false, 'Modern placement must not pass by exercising legacy split');
+  const afterTabs = await fixture.readState();
+  assert.deepEqual(afterTabs.snapshot.tabs.find(tab => tab.tab_id === ownPane.tab_id), ownTab, 'Launching tabs must preserve Shep’s existing tab');
+  assert.equal(afterTabs.snapshot.focused_pane_id, ownPane.pane_id);
+  assert.equal(new Set(afterTabs.snapshot.agents.filter(agent => agent.terminal_id.startsWith('fixture-terminal-')).map(agent => agent.name)).size, 10);
+
+  pty.send('\x1b[200~/dispatch codex@remote: Open the unopened project\x1b[201~');
+  await delay(50); pty.send('\r');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 11, 'Project without an open workspace did not receive the task');
+  await waitFor(() => pty.screen().includes('Prompt submitted'), 'Workspace dispatch outcome did not render');
+  const calls = await fixture.calls();
+  const created = calls.filter(({ args }) => args[0] === 'workspace' && args[1] === 'create');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].args[created[0].args.indexOf('--label') + 1], 'remote');
+  assert.equal(created[0].args[created[0].args.indexOf('--cwd') + 1], remoteProject);
+  assert.ok(created[0].args.includes('--no-focus'));
+  const state = await fixture.readState();
+  const launched = state.snapshot.agents.find(agent => agent.name === calls.filter(({ args }) => args[1] === 'start').at(-1).args[2]);
+  assert.equal(launched.cwd, remoteProject);
+  assert.equal(state.snapshot.panes.filter(pane => pane.workspace_id === launched.workspace_id).length, 1, 'New workspace launch must use its root pane');
+  assert.equal(state.snapshot.focused_pane_id, ownPane.pane_id);
+
+  const response = await fetch('http://127.0.0.1:' + pty.port + '/api/snapshot');
+  assert.equal(response.status, 200);
+  const publicSnapshot = await response.json();
+  assert.deepEqual(Object.keys(publicSnapshot).sort(), ['agents', 'mode', 'polledAt', 'refreshIntervalMs', 'schemaVersion', 'source', 'updatedAt']);
+  const serialized = JSON.stringify(publicSnapshot);
+  assert.doesNotMatch(serialized, /PRIVATE_(?:PROMPT|CONFIG)_SENTINEL|"(?:tasks|prompt|inputTask|history|config|args|intent|created)"\s*:/);
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const refused = await fetch('http://127.0.0.1:' + pty.port + '/api/snapshot', { method, body: 'PRIVATE_BROWSER_WRITE' });
+    assert.equal(refused.status, 405);
+  }
+  assert.equal((await fetch('http://127.0.0.1:' + pty.port + '/')).status, 200);
+  assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, 11);
+  await assert.rejects(readFile(fixture.historyPath), { code: 'ENOENT' });
+  assert.equal(await readFile(fixture.configPath, 'utf8'), originalConfig);
+  pty.send('q');
+  const exit = await waitFor(() => pty.exited(), 'Checkpoint app did not quit');
+  assert.equal(exit.code, 0, pty.errors());
+  assert.equal(exit.rawRestored, true);
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'pane' && args[1] === 'close'), false);
+  assert.equal((await fixture.readState()).snapshot.agents.filter(agent => agent.terminal_id.startsWith('fixture-terminal-')).length, 11);
+});
+
+for (const [label, columns, rows, subfolder] of [
+  ['ordinary path', 123, 35, 'src/api'],
+  ['long path in the minimum terminal', 40, 15, 'src/' + 'nested-checkpoint-folder-'.repeat(7) + '/api'],
+]) test(`checkpoint QA: installed automatic isolation visibly explains ${label} and uses the returned root`, { timeout: 45000 }, async t => {
+  const repo = await makeRepo({ files: { 'README.md': 'Synthetic isolation acceptance.\n', [subfolder + '/sample.txt']: 'Fixture content.\n' } });
+  t.after(repo.cleanup);
+  const fixture = await transportFixture();
+  const checkout = join(fixture.directory, 'controlled-checkout');
+  await mkdir(checkout);
+  const state = await fixture.readState();
+  Object.assign(state.snapshot.panes[0], { cwd: join(repo.root, subfolder), foreground_cwd: join(repo.root, subfolder) });
+  const existing = state.snapshot.agents.find(agent => agent.name === 'beta-fixture');
+  Object.assign(existing, { cwd: repo.root, agent_status: 'working' });
+  Object.assign(state.snapshot.panes.find(pane => pane.pane_id === existing.pane_id), { cwd: repo.root, foreground_cwd: repo.root });
+  await fixture.setState(state);
+  await atomicJson(fixture.configPath, { projects: { entries: [{ name: 'rootnotice', path: repo.root }] }, notifications: { enabled: false } });
+  const creationRelease = join(fixture.directory, 'creation-release');
+  const scenario = JSON.parse(await readFile(fixture.scenarioPath, 'utf8'));
+  Object.assign(scenario, { worktreePath: checkout, worktreeSource: { repo_key: repo.commonDir, repo_name: 'rootnotice', repo_root: repo.root,
+    source_checkout_path: repo.root, source_workspace_id: 'w1' } });
+  scenario.steps.unshift({ id: 'observe-worktree-creation', match: { prefix: ['worktree', 'create'] }, effect: 'default', barrierPath: creationRelease, barrierTimeoutMs: 15000 });
+  await atomicJson(fixture.scenarioPath, scenario);
+  const pty = await startInstalledPty(t, fixture, { columns, rows });
+  await waitFor(() => pty.screen().includes('rootnotice') && !pty.screen().includes('Projects loading'), 'The synthetic Git project did not load');
+  pty.send('\x1b[200~/dispatch Check root placement\x1b[201~');
+  await delay(60); pty.send('\r');
+  const meaning = columns === 40 ? 'Worktree starts at repository root; selected subfolder is not applied'
+    : "Worktree starts at the repository root; subfolder src/api isn't applied";
+  await waitFor(() => pty.frames().some(frame => frame.replace(/\s+/g, ' ').includes(meaning)), 'The full root-location consequence was not visibly flushed');
+  await waitFor(async () => (await fixture.calls()).some(call => call.stepId === 'observe-worktree-creation'), 'Automatic worktree creation did not follow the notice');
+  const creating = (await fixture.calls()).find(call => call.stepId === 'observe-worktree-creation').args;
+  assert.equal(creating[creating.indexOf('--cwd') + 1], repo.root, 'A subfolder must never be passed as the worktree launch root');
+  assert.equal(creating.includes('--path'), false, 'The test must not inject a production request flag to make the fake pass');
+  assert.equal(creating.includes('--trust-repository'), false, 'Normal placement must not silently grant repository trust');
+  assert.match(creating[creating.indexOf('--branch') + 1], /^shep\/check-root-placement-[a-f0-9]{4}$/);
+  assert.equal((await fixture.calls()).some(({ args }) => args[1] === 'start'), false, 'The held creation response must not allow agent startup');
+  await writeFile(creationRelease, 'released\n');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 1, 'The root-only worktree launch did not submit once');
+  await waitFor(() => pty.screen().includes('Prompt submitted'), 'Worktree outcome did not render');
+  const after = await fixture.readState();
+  const agent = after.snapshot.agents.find(item => item.terminal_id === 'fixture-terminal-9');
+  assert.equal(agent.cwd, checkout);
+  assert.equal(after.snapshot.panes.find(pane => pane.pane_id === agent.pane_id).foreground_cwd, checkout);
+  assert.equal(after.snapshot.focused_pane_id, ownPane.pane_id);
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'notification'), false);
+  pty.send('d');
+  await waitFor(() => pty.screen().includes('TASK ·'), 'Created task detail was not accessible');
+  let detail = '';
+  for (let index = 0; index < 70; index += 1) {
+    detail += '\n' + pty.screen();
+    pty.send('\x1b[B'); await delay(40);
+  }
+  assert.ok(detail.includes('Worktree') || detail.includes('worktree'), 'Detail must retain actual worktree placement');
+  assert.ok(detail.includes('Subfolder') || detail.includes('subfolder'), 'Detail must keep the requested subfolder accessible');
+  pty.send('q');
+  const exit = await waitFor(() => pty.exited(), 'Isolation acceptance did not quit');
+  assert.equal(exit.code, 0, pty.errors());
+  assert.equal(exit.rawRestored, true);
+  assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, 1);
+  assert.equal((await fixture.calls()).some(({ args }) => ['close', 'remove'].includes(args[1])), false);
+  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === agent.terminal_id), 'Quitting must preserve the created worktree agent');
 });
