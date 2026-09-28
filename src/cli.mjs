@@ -29,7 +29,9 @@ export async function createDispatchRuntime({ context, monitor, mode = 'live', c
     else notices.push(message);
   };
   const reportConfig = () => {
-    const messages = [...settings.errors, ...settings.warnings].map(issue => issue.message)
+    const prefix = `Config ${settings.path}: `;
+    const messages = [...settings.errors, ...settings.warnings].map(issue => issue.message.startsWith(prefix)
+      ? `Config ${issue.message.slice(prefix.length)}; file: ${settings.path}` : issue.message)
       .filter(message => !reportedConfig.has(message));
     messages.forEach(message => reportedConfig.add(message));
     if (messages.length) notice(messages.join('; '));

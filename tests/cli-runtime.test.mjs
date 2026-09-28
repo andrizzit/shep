@@ -82,6 +82,22 @@ test('demo runtime ignores personal configuration, refuses trust writes and neve
   assert.deepEqual((await runtime.tuiOptions.registry.refresh()).projects, []);
 });
 
+test('malformed config reports the problem before its full file path and still uses defaults', async t => {
+  const repo = await makeRepo(), fixture = host(repo);
+  const configFile = join(repo.home, 'long-configuration-directory-for-compact-terminal-regression', 'config.json');
+  await mkdir(dirname(configFile));
+  await writeFile(configFile, '{not valid JSON');
+  const runtime = await createDispatchRuntime({ ...fixture, configFile });
+  t.after(() => runtime.dispose());
+  const notices = [];
+  runtime.attachTui({ getTasks: () => [], showNotice: message => notices.push(message) });
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /^Config \$: must contain valid JSON; file: /);
+  assert.ok(notices[0].endsWith(configFile), 'the complete diagnostic path stays accessible');
+  assert.deepEqual(runtime.tuiOptions.getConfig().projects, { roots: [], entries: [] });
+  assert.equal(await readFile(configFile, 'utf8'), '{not valid JSON', 'fallback never rewrites configuration');
+});
+
 test('quitting cancels active registry Git children and never starts queued discovery reads', async t => {
   const repo = await makeRepo(), fixture = host(repo);
   const bin = join(repo.container, 'bin'), log = join(repo.container, 'git-children.jsonl');
