@@ -1,6 +1,6 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,7 +15,7 @@ const execute = promisify(execFile);
 const project = fileURLToPath(new URL('../', import.meta.url));
 let temporary, executables;
 before(async () => {
-  temporary = await mkdtemp(join(tmpdir(), 'shep-orchestrator-review-'));
+  temporary = await realpath(await mkdtemp(join(tmpdir(), 'shep-orchestrator-review-')));
   executables = join(temporary, 'controlled binaries');
   await mkdir(executables);
   for (const name of ['codex', 'claude', 'kiro-cli', 'grok']) {
@@ -267,7 +267,7 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
     // frame and the mouse setup written immediately after Ink's first render.
     return output.includes('\x1b[?1000h') && output.includes('\x1b[?1006h')
       && output.lastIndexOf('\x1b[?2026l') > output.lastIndexOf('\x1b[?2026h')
-      && pty.screen().includes('YOUR AGENTS');
+      && (pty.screen().includes('YOUR AGENTS') || pty.screen().includes('TASKS'));
   }, 'Installed Ink app did not finish startup: ' + errorOutput);
   return pty;
 }
@@ -303,6 +303,11 @@ function terminalScreen(transcript, width = 140, height = 45) {
     grid[y][x++] = value;
   }
   return grid.map(row => row.join('')).join('\n');
+}
+
+async function enterAgents(pty) {
+  if (!pty.screen().includes('YOUR AGENTS')) pty.send('g');
+  await waitFor(() => pty.screen().includes('YOUR AGENTS'), 'Agents navigation did not restore the live agent list');
 }
 
 async function clickText(pty, text) {
@@ -639,6 +644,7 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
   const pty = await startInstalledPty(t, fixture);
   assert.match(pty.output(), /\x1b\[\?1000h/);
   assert.match(pty.output(), /\x1b\[\?1006h/);
+  await enterAgents(pty);
   pty.send('\x1b[B');
   await delay(80);
   pty.send('\r');
@@ -738,6 +744,7 @@ test('orchestrator QA: installed NO_COLOR layout fits exact terminal width and c
   fixture.env.NO_COLOR = '1';
   delete fixture.env.FORCE_COLOR;
   const pty = await startInstalledPty(t, fixture, { columns: 123, rows: 35 });
+  await enterAgents(pty);
   await waitFor(() => pty.screen().includes('SELECTED AGENT'), 'Desktop detail panel did not render');
   const desktop = pty.screen().split('\n');
   const desktopTop = desktop.find(row => row.includes('╭'));
