@@ -45,6 +45,12 @@ async function atomicJson(path, value) {
 
 // Serialized into a separate controlled executable; this never invokes Herdr.
 async function fakeHerdrMain() {
+  // D0 opt-in: later dispatcher PTY scenarios use the shared, versioned fake.
+  // Existing 0.3.0 journeys and their close/safety assertions remain unchanged.
+  if (process.env.SHEP_TEST_SCENARIO && process.env.SHEP_TEST_DISPATCH_BINARY) {
+    await require(process.env.SHEP_TEST_DISPATCH_BINARY);
+    return;
+  }
   const fs = require('node:fs');
   const stateFile = process.env.ORCHESTRATOR_QA_STATE;
   const read = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
