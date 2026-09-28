@@ -25,7 +25,7 @@
     "tests/fixtures/demo-snapshot.json"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.23.2"
   },
   "scripts": {
     "start": "node bin/shep.mjs",
