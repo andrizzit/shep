@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNotifier } from '../src/notify.mjs';
 import { DEFAULT_CONFIG } from '../src/dispatch/contracts.mjs';
+import { createTask, transition } from '../src/tasks.mjs';
+import { makeProject } from './helpers/dispatch-fakes.mjs';
 function fixture(settings = {}, initialStatus = 'working') {
   let listener, time = 1000;
   const calls = [], config = structuredClone(DEFAULT_CONFIG);
@@ -120,6 +122,7 @@ test('real task outcomes retain conservative notifications regardless of snapsho
   const at = '2026-09-27T12:00:00.000Z';
   for (const snapshotFirst of [true, false]) for (const [state, status, expected] of [
     ['submitted', 'done', 1], ['submitted', 'idle', 0], ['needs_input', 'blocked', 1],
+    ['submitted', 'blocked', 1], ['uncertain', 'blocked', 1], ['uncertain', 'idle', 0],
   ]) {
     const project = makeProject();
     const spec = { kind: 'dispatch', agents: [{ provider: 'codex', profile: null }], project, mode: 'auto', modeIntent: 'auto',
@@ -139,6 +142,10 @@ test('real task outcomes retain conservative notifications regardless of snapsho
     task = transition(task, { type: 'outcome', outcome }); publish(snapshot);
     if (!snapshotFirst) { snapshot.agents = [agent]; publish(snapshot); }
     publish(snapshot); assert.equal(calls.length, expected, `${state}/${status}/snapshotFirst=${snapshotFirst}`);
+    if (status === 'blocked') {
+      assert.equal(calls[0].sound, 'request');
+      assert.match(calls[0].title, state === 'needs_input' ? /needs setup/ : /needs input/);
+    }
     // The same terminal can host a replacement CLI. Its later status must not
     // be attributed to the task whose target came from the genuine outcome.
     agent.provider = 'claude'; agent.status = 'done'; publish(snapshot);
@@ -146,4 +153,78 @@ test('real task outcomes retain conservative notifications regardless of snapsho
     assert.equal(calls.length, expected, 'Replacement status is not the original task’s status');
     notifier.dispose();
   }
+});
+
+function blockedLifecycle({ state = 'submitted', settings = {}, boundAtStartup = false, sessionId } = {}) {
+  const at = '2026-09-27T12:00:00.000Z', project = makeProject();
+  const spec = { kind: 'dispatch', agents: [{ provider: 'codex', profile: null }], project, mode: 'auto', modeIntent: 'auto',
+    subfolder: '', template: null, task: 'Review code', inputTask: 'Review code', command: '/dispatch Review code' };
+  const placement = { projectKey: project.key, root: project.root, mode: 'auto', subfolder: '', label: 'Review code', placementStyle: 'tab' };
+  let task = createTask(spec, { id: 'review', attemptId: 'attempt', at, name: 'review-codex', placement });
+  task = transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage: 'target', at } });
+  const agent = { paneId: 'new-pane', terminalId: 'new-terminal', provider: 'codex', name: task.name,
+    agentName: task.name, sessionId: sessionId ?? null, status: 'blocked', focused: false };
+  const snapshot = { mode: 'live', source: { state: 'connected' }, agents: [] }, calls = [];
+  const bind = () => {
+    task = transition(task, { type: 'outcome', outcome: { ok: state === 'submitted', state, message: state,
+      taskId: task.id, attemptId: task.attemptId, paneId: agent.paneId, terminalId: agent.terminalId, agentName: task.name } });
+    // Session identity is optional in captured targets. When known it must also
+    // match, although the current controller outcome only supplies the tuple/name.
+    if (sessionId) task.target.sessionId = sessionId;
+    snapshot.agents = [agent];
+  };
+  if (boundAtStartup) bind();
+  const config = structuredClone(DEFAULT_CONFIG);
+  Object.assign(config.notifications, settings);
+  let publish;
+  const notifier = createNotifier({ monitor: { getSnapshot: () => snapshot, subscribe: listener => { publish = listener; return () => {}; } },
+    controller: { notify: request => calls.push(request) }, config, getTasks: () => [task] });
+  return { agent, snapshot, calls, config, bind, tick: () => publish(snapshot), dispose: notifier.dispose };
+}
+
+test('first-bound blocked outcomes honor focus suppression without replaying the same blocked state', () => {
+  for (const state of ['submitted', 'uncertain']) {
+    const f = blockedLifecycle({ state });
+    f.bind(); f.agent.focused = true; f.tick(); f.tick();
+    assert.equal(f.calls.length, 0, `${state}: focused first observation is silent`);
+    f.agent.focused = false; f.tick();
+    assert.equal(f.calls.length, 0, 'Unfocus alone is not a new status transition');
+    f.agent.status = 'working'; f.tick(); f.agent.status = 'blocked'; f.tick();
+    assert.equal(f.calls.length, 1); assert.equal(f.calls[0].sound, 'request');
+    f.dispose();
+
+    const optedIn = blockedLifecycle({ state, settings: { onlyWhenUnfocused: false, sound: false } });
+    optedIn.bind(); optedIn.agent.focused = true; optedIn.tick(); optedIn.tick();
+    assert.equal(optedIn.calls.length, 1); assert.equal(optedIn.calls[0].sound, 'none');
+    optedIn.dispose();
+  }
+});
+
+test('first-bound blocked outcomes require every supplied captured identity field', () => {
+  for (const state of ['submitted', 'uncertain']) for (const field of ['paneId', 'terminalId', 'provider', 'agentName', 'sessionId']) for (const missing of [false, true]) {
+    const f = blockedLifecycle({ state, sessionId: 'known-session' });
+    f.bind();
+    if (missing) delete f.agent[field]; else f.agent[field] = 'replacement';
+    if (field === 'agentName') { if (missing) delete f.agent.name; else f.agent.name = 'replacement'; }
+    f.tick(); f.tick();
+    assert.equal(f.calls.length, 0, `${state}/${field}/${missing ? 'missing' : 'changed'}`);
+    f.dispose();
+  }
+});
+
+test('initial blocked snapshots and disabled notifications stay silent after real outcomes', () => {
+  for (const state of ['submitted', 'uncertain']) {
+    const initial = blockedLifecycle({ state, boundAtStartup: true });
+    initial.tick(); initial.tick(); assert.equal(initial.calls.length, 0, `${state}: global baseline remains silent`); initial.dispose();
+    const disabled = blockedLifecycle({ state, settings: { enabled: false } });
+    disabled.bind(); disabled.tick(); disabled.tick(); assert.equal(disabled.calls.length, 0); disabled.dispose();
+  }
+});
+
+test('new opt-in external blocked agents establish a baseline without using task first-binding rules', () => {
+  const f = blockedLifecycle({ settings: { external: true } });
+  f.snapshot.agents = [{ ...f.agent, paneId: 'external-pane', terminalId: 'external-terminal' }];
+  f.tick(); f.tick(); assert.equal(f.calls.length, 0);
+  f.snapshot.agents[0].status = 'working'; f.tick(); f.snapshot.agents[0].status = 'blocked'; f.tick();
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].sound, 'request'); f.dispose();
 });

@@ -46,7 +46,11 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       // supports first-observation completion; synthetic unknown is no evidence.
       const firstCompletion = value.launch === 'submitted' && value.observed && value.status === 'done'
         && (!old?.paneId || (sameTarget && !old.observed));
-      if (!setup && !firstCompletion && !sameTarget) continue;
+      // A dispatched agent can reach an input prompt before its outcome binds
+      // the target. Its first blocked observation still needs attention.
+      const firstBlocked = ['submitted', 'uncertain'].includes(value.launch) && value.observed && value.status === 'blocked'
+        && (!old?.paneId || (sameTarget && !old.observed));
+      if (!setup && !firstCompletion && !firstBlocked && !sameTarget) continue;
       let transition, title, body = task.label, sound;
       const label = `${safeText(task.project)} · ${safeText(names.get(task.provider) ?? task.provider ?? 'Agent')}`;
       if (setup) {
