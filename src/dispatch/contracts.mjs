@@ -72,7 +72,7 @@ export const LIMITS = freeze({
   notificationDedupeMs: 30000, summaryThrottleMs: 10000, gitConcurrency: 4,
   registryGitTimeoutMs: 1000, summaryGitTimeoutMs: 2000,
   followUpTimeoutMs: 8000, startTimeoutMs: 30000, startTransportTimeoutMs: 35000,
-  gitStatusBytes: 1048576,
+  prelaunchNoticeTimeoutMs: 1500, gitStatusBytes: 1048576,
 });
 export const PATTERNS = freeze({
   project: /^[A-Za-z0-9._-]{1,64}$/,
@@ -173,6 +173,7 @@ export const MESSAGES = freeze({
   blockedFollowUp: 'The agent is waiting for input in its pane. Answer it there.',
   worktreeWorking: 'Wait for the agent to finish or close it first',
   worktreeSubfolder: "Worktree starts at the repository root; subfolder {subfolder} isn't applied",
+  prelaunchNoticeFailed: 'The worktree location notice could not be displayed. No launch was started.',
   invalidPrompt: 'Enter a nonempty prompt no larger than 64 KiB. Newlines and tabs are allowed; terminal control characters are not.',
   config: 'Config {path}: {key}: {problem}',
 });
@@ -340,6 +341,7 @@ export const VALIDATION_PROBLEMS = freeze({
  * @property {string} at
  * @property {{mode:'here'|'worktree',reason:string}} [placement] Target-stage decision, not a receipt or ActualPlacement.
  * @property {string} [message] Target-only notice, emitted before the first mutation.
+ * @property {true} [noticeRequired] Target-only worktree notice requiring a visible-flush acknowledgement.
  */
 /**
  * @typedef {object} Outcome
@@ -360,7 +362,8 @@ export const VALIDATION_PROBLEMS = freeze({
 /**
  * Controller interface:
  * createController({context,monitor,mode,run,readRaw,config,getConfig,registry,git,fs,now,randomHex,onNotice})
- * dispatch(request,{onProgress}={}) -> Promise<Outcome>.
+ * dispatch(request,{onProgress}={}) -> Promise<Outcome>;
+ * onProgress(event) -> void|Promise<void>.
  * getProfiles() -> Promise<existing profiles plus {snapshot: private Herdr snapshot}>.
  * getControlSnapshot() -> Promise<complete fresh private snapshot>; no executable
  * availability scan. Agent-only public snapshots never prove that a pane disappeared.
@@ -380,13 +383,26 @@ export const VALIDATION_PROBLEMS = freeze({
  *
  * Legacy dispatch({provider,prompt,name?,cwd?,workspaceId?}) is explicit split behavior
  * when placement is absent; generated IDs are allowed ONLY for legacy callers.
- * Progress callback failures never interrupt a launch. Events retain task/attempt IDs;
+ * Ordinary progress callbacks are nonfatal observers: catch sync throws and rejected
+ * promises. Required target notices are the exception below. Events retain task/attempt IDs;
  * queued -> target -> start -> prompt, skipping later stages after failure. A callback
  * never implies prompt delivery. Final outcomes may not overwrite another task/draft.
  * Target-stage placement/message is emitted AFTER fresh locked resolution but BEFORE
  * any creation. Worktree + nonempty requested subfolder always announces the root-only
  * notice; no extra tab, shell cd or native cwd argument is permitted. Render-only text
  * is sanitized; the intent is unchanged. Headless notices go to stderr, preserving JSON.
+ * That root-only notice sets noticeRequired:true. The controller derives the requirement
+ * from resolved worktree mode and nonempty requested subfolder, never a request override.
+ * Before any native mutation, await onProgress completion for this required event only,
+ * bounded by prelaunchNoticeTimeoutMs (1500 ms) and abortable on dispose. Missing handler,
+ * rejection or timeout returns failed/target with code prelaunch_notice_failed and the
+ * sanitized prelaunchNoticeFailed message; nothing is created or started by that attempt.
+ * Dispose uses the shutdown outcome instead; recheck disposed after acknowledgement.
+ * A frontend acknowledgement means THIS task/attempt notice has visibly flushed: Ink
+ * waits for waitUntilRenderFlush(), CLI waits for its stderr write callback. Merely
+ * updating state is insufficient. Concurrent notices must not acknowledge an overwritten
+ * notice; serialize flushes or otherwise establish each specific notice was rendered.
+ * Sync completed writes may acknowledge immediately. This is no owner-approval dialog.
  * Per-project target locks and reservations cover one process. Uncertain reservations
  * are not freed merely because an unready shell appears; reconcile the receipt safely.
  */
@@ -732,6 +748,10 @@ export function validateProgressEvent(event) {
     event.stage === 'target' && plainObject(event.placement) && RESOLVED_MODES.includes(event.placement.mode) && typeof event.placement.reason === 'string',
     'placement', 'invalid_progress', 'must be a target-stage placement decision');
   if (event.message !== undefined) add(errors, event.stage === 'target' && typeof event.message === 'string', 'message', 'invalid_progress', 'must be a target-stage notice');
+  if (event.noticeRequired !== undefined) add(errors,
+    event.noticeRequired === true && event.stage === 'target' && event.placement?.mode === 'worktree'
+      && typeof event.message === 'string' && Boolean(event.message.trim()),
+    'noticeRequired', 'invalid_progress', 'must mark a target-stage worktree notice with nonempty text');
   return errors;
 }
 

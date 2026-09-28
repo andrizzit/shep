@@ -140,11 +140,27 @@ test('D0 config schema: defaults, nested errors and warning-only unknown keys', 
 test('D0 progress: only target events carry the pre-mutation root-only notice', () => {
   const event = { taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at,
     placement: { mode: 'worktree', reason: 'Checkout busy' },
-    message: MESSAGES.worktreeSubfolder.replace('{subfolder}', 'src/api') };
+    message: MESSAGES.worktreeSubfolder.replace('{subfolder}', 'src/api'), noticeRequired: true };
   assert.deepEqual(validateProgressEvent(event), []);
   assert.equal(event.message, "Worktree starts at the repository root; subfolder src/api isn't applied");
   assert.ok(validateProgressEvent({ ...event, stage: 'prompt' }).length);
   assert.ok(validateProgressEvent({ ...event, attemptId: '' }).length);
+});
+
+test('D0 required notice acknowledgement is explicit, bounded and target-worktree only', () => {
+  const event = { taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at,
+    placement: { mode: 'worktree', reason: 'Checkout busy' }, message: 'Root-only worktree notice.', noticeRequired: true };
+  assert.equal(LIMITS.prelaunchNoticeTimeoutMs, 1500);
+  assert.deepEqual(validateProgressEvent(event), []);
+  for (const patch of [{ noticeRequired: false }, { noticeRequired: 'true' }, { stage: 'start' },
+    { message: undefined }, { message: '   ' }, { placement: { mode: 'here', reason: 'Main checkout' } }]) {
+    assert.ok(validateProgressEvent({ ...event, ...patch }).some(item => item.path === 'noticeRequired'));
+  }
+  assert.deepEqual(validateProgressEvent({ taskId: request.taskId, attemptId: request.attemptId, stage: 'start', at }), []);
+  const refused = { ok: false, state: 'failed', taskId: request.taskId, attemptId: request.attemptId,
+    stage: 'target', code: 'prelaunch_notice_failed', message: MESSAGES.prelaunchNoticeFailed };
+  assert.deepEqual(validateOutcome(refused), []);
+  assert.equal(Object.hasOwn(refused, 'created'), false);
 });
 
 test('D0 outcome receipts reject cross-workspace and cross-terminal claims', () => {
