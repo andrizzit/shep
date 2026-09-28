@@ -40,9 +40,10 @@ export function transition(task, event) {
     if (FINAL_LAUNCH_STATES.includes(task.launch.state) || task.launch.state === 'needs_confirmation') fail('This launch attempt already has an outcome.');
     const current = task.launch.stage === null ? -1 : PROGRESS_STAGES.indexOf(task.launch.stage);
     const next = PROGRESS_STAGES.indexOf(progress.stage);
-    if (next < current || (task.launch.state === 'starting' && progress.stage === 'queued')) fail('Launch progress cannot move backwards.');
+    const confirmedQueue = task.launch.state === 'starting' && task.launch.stage === null && progress.stage === 'queued';
+    if (next < current || (task.launch.state === 'starting' && progress.stage === 'queued' && !confirmedQueue)) fail('Launch progress cannot move backwards.');
     if (progress.stage !== 'queued' && task.launch.state === 'queued') launchState(task, 'starting');
-    updated.launch = { ...task.launch, state: progress.stage === 'queued' ? 'queued' : 'starting', stage: progress.stage, message: progress.message ?? (progress.stage === 'queued' ? 'Queued for launch.' : 'Starting agent…') };
+    updated.launch = { ...task.launch, state: progress.stage === 'queued' ? task.launch.state : 'starting', stage: progress.stage, message: progress.message ?? (progress.stage === 'queued' ? 'Queued for launch.' : 'Starting agent…') };
   } else if (event.type === 'outcome') {
     const outcome = event.outcome;
     assertContract(validateOutcome(outcome));
