@@ -1,7 +1,15 @@
 import { execFile } from 'node:child_process';
 import { access, stat } from 'node:fs/promises';
+import * as nativeFs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
+import { DEFAULT_CONFIG, LIMITS, MESSAGES as DISPATCH_MESSAGES, validateDispatchRequest, validatePrompt } from './dispatch/contracts.mjs';
+import { createGitRunner } from './gitinfo.mjs';
+import { normalizeControlSnapshot } from './herdr.mjs';
+import { safeText } from './terminal.mjs';
+import { createTargetService } from './dispatch/targets.mjs';
+import { createLaunchRunner } from './dispatch/launch.mjs';
+import { createCleanupOperations } from './dispatch/cleanup.mjs';
 import { randomBytes } from 'node:crypto';
 
 // Herdr 0.9.1's documented interactive kinds and canonical executables.
@@ -29,6 +37,14 @@ const MESSAGES = Object.assign(Object.create(null), {
   invalid_prompt: 'Enter a nonempty prompt no larger than 64 KiB. Newlines and tabs are allowed; terminal control characters are not.',
   invalid_name: 'Agent names must start with a lowercase letter and contain at most 32 lowercase letters, digits, underscores or hyphens.',
   duplicate_name: 'That agent name is already in use. Choose another name.',
+  invalid_args: 'Agent arguments must be at most 32 separate strings of 512 bytes each, without control characters.',
+  changed_project: 'The project identity changed. Refresh and select it again.',
+  branch_collision: 'No unused worktree branch name was found after five checks. Choose another task name.',
+  placement_pending: 'An earlier workspace creation is not yet confirmed. Inspect or dismiss that task before creating another workspace.',
+  unowned_worktree: 'Only a worktree created by this Shep session can be removed here.',
+  untrusted_repository: 'This repository needs explicit trust confirmation before retrying.',
+  trust_reconciliation_failed: 'Repository or Herdr resources changed after the trust refusal. Inspect them before launching again.',
+  git_failed: 'Git could not verify this repository. Check the repository and refresh before dispatching.',
   invalid_cwd: 'Choose an existing absolute directory on this machine.',
   workspace_missing: 'The selected workspace is no longer available. Refresh and choose it again.',
   no_room: 'The target pane is too small or zoomed. Enlarge or unzoom it before dispatching.',
@@ -45,11 +61,11 @@ const MESSAGES = Object.assign(Object.create(null), {
 });
 
 class ControlError extends Error {
-  constructor(code) { super(MESSAGES[code] ?? MESSAGES.failed); this.code = code; }
+  constructor(code, privateMessage) { super(MESSAGES[code] ?? MESSAGES.failed); this.code = code; this.privateMessage = privateMessage; }
 }
 const present = value => typeof value === 'string' && value.length > 0 && !value.includes('\0');
 const fail = code => { throw new ControlError(code); };
-const outcome = (state, message, details = {}) => ({ ok: ['submitted', 'focused', 'closed'].includes(state), state, message, ...details });
+const outcome = (state, message, details = {}) => ({ ok: ['submitted', 'focused', 'closed', 'removed', 'dismissed'].includes(state), state, message, ...details });
 const errorCode = error => typeof error?.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(error.code) ? error.code : 'failed';
 
 function commandRunner(context) {
@@ -57,7 +73,7 @@ function commandRunner(context) {
     execFile(context.binary, argv, { env: context.env, encoding: 'utf8', timeout: timeoutMs, maxBuffer, killSignal: 'SIGKILL', signal }, (error, stdout, stderr) => {
       let envelope;
       try { envelope = JSON.parse(error ? stderr : stdout); } catch { /* Only structured server errors are inspected. */ }
-      if (envelope?.error) return reject(new ControlError(errorCode(envelope.error)));
+      if (envelope?.error) return reject(new ControlError(errorCode(envelope.error), envelope.error.message));
       if (error) {
         if (signal?.aborted) return reject(new ControlError('disposed'));
         const code = error.code === 'ENOENT' ? 'not_found' : error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 'too_large' : error.killed || error.signal === 'SIGKILL' ? 'timeout' : 'unavailable';
@@ -80,7 +96,7 @@ async function hasExecutable(executable, env) {
   return false;
 }
 
-export function createController({ context, monitor, mode = 'live', run, readRaw } = {}) {
+export function createController({ context, monitor, mode = 'live', run, readRaw, config = DEFAULT_CONFIG, getConfig = () => config, registry, git, fs = nativeFs, now = () => new Date().toISOString(), randomHex = length => randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length), onNotice } = {}) {
   const pinned = {
     binary: context?.binary ?? context?.env?.HERDR_BIN_PATH ?? 'herdr',
     env: { ...context?.env },
@@ -92,13 +108,23 @@ export function createController({ context, monitor, mode = 'live', run, readRaw
   const active = () => { if (disposed) fail('disposed'); };
   const invoke = async (argv, options = {}) => {
     active();
+    if (hasMutation(argv)) assertLive();
     const response = await transport(argv, { ...options, signal: abort.signal });
     active();
     return response;
   };
   const read = readRaw ?? (() => invoke(['api', 'snapshot']));
   let ownTerminalId = null;
-  let busy = false;
+  const gitRead = git ?? createGitRunner({ env: pinned.env, getConfig, fs });
+  const jobs = new Map(), taskAttempts = new Map(), reservations = new Map(), receipts = new Map();
+  const projectLocks = new Map(), operationLocks = new Map(), queue = [];
+  let launches = 0, notificationFailed = false;
+  const timestamp = () => new Date(now()).toISOString();
+  const messageFor = code => code === 'prelaunch_notice_failed' ? DISPATCH_MESSAGES.prelaunchNoticeFailed : MESSAGES[code] ?? 'The action could not be completed safely. Refresh and inspect Herdr.';
+  const trusted = root => (getConfig()?.worktrees?.trustedRepos ?? []).includes(root);
+  const jobKey = request => JSON.stringify([request.taskId, request.attemptId]);
+  const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove'].includes(argv[1]);
+
 
   function assertContext() {
     active();
@@ -140,15 +166,27 @@ export function createController({ context, monitor, mode = 'live', run, readRaw
 
   async function getProfiles() {
     const { snapshot, own } = await fresh();
-    return profiles(snapshot, own);
+    return { ...await profiles(snapshot, own), snapshot: structuredClone(snapshot) };
   }
 
-  async function exclusive(action) {
-    if (busy) return outcome('failed', MESSAGES.busy, { code: 'busy' });
-    busy = true;
-    try { assertLive(); return await action(); }
-    catch (error) { const code = errorCode(error); return outcome('failed', MESSAGES[code] ?? MESSAGES.failed, { code }); }
-    finally { busy = false; }
+  async function operation(target, action, workspace = false) {
+    const key = `${workspace ? 'workspace' : 'pane'}:${workspace ? target?.workspaceId : target?.paneId}`;
+    if (operationLocks.has(key)) return outcome('failed', MESSAGES.busy, { code: 'busy' });
+    const lock = { workspaceId: workspace ? target?.workspaceId : null };
+    operationLocks.set(key, lock);
+    try {
+      assertLive();
+      const initial = await fresh();
+      lock.workspaceId ??= initial.snapshot.panes.find(p => p.pane_id === target?.paneId)?.workspace_id;
+      if ([...operationLocks.entries()].some(([otherKey, other]) => otherKey !== key && other.workspaceId === lock.workspaceId && (workspace || otherKey.startsWith('workspace:')))) fail('busy');
+      return await action();
+    } catch (error) { const code = errorCode(error); return outcome('failed', messageFor(code), { code }); }
+    finally { operationLocks.delete(key); }
+  }
+
+  async function getControlSnapshot() {
+    const { snapshot } = await fresh();
+    return normalizeControlSnapshot({ result: { snapshot } });
   }
 
   function checkTarget(target, own) {
@@ -188,76 +226,75 @@ export function createController({ context, monitor, mode = 'live', run, readRaw
     fail('no_room');
   }
 
-  async function dispatch(request = {}) {
-    return exclusive(async () => {
-      const { provider, prompt, name: requestedName } = request;
-      if (!KINDS.has(provider)) fail('invalid_provider');
-      if (typeof prompt !== 'string' || !prompt.trim() || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(prompt) || Buffer.byteLength(prompt, 'utf8') > 65536) fail('invalid_prompt');
-      if (requestedName != null && (typeof requestedName !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(requestedName))) fail('invalid_name');
-      const { snapshot, own } = await fresh();
-      const workspaceId = request.workspaceId ?? own.workspace_id;
-      const workspace = snapshot.workspaces.find(w => w.workspace_id === workspaceId);
-      if (!workspace) fail('workspace_missing');
-      const anchor = workspaceId === own.workspace_id ? own
-        : snapshot.panes.find(p => p.workspace_id === workspaceId && p.tab_id === workspace.active_tab_id && p.focused)
-          ?? snapshot.panes.find(p => p.workspace_id === workspaceId && p.tab_id === workspace.active_tab_id);
-      if (!anchor) fail('workspace_missing');
-      const cwd = request.cwd ?? anchor.foreground_cwd ?? anchor.cwd ?? workspace.worktree?.checkout_path;
-      if (!present(cwd) || !isAbsolute(cwd) || Buffer.byteLength(cwd, 'utf8') > 4096) fail('invalid_cwd');
-      try { if (!(await stat(cwd)).isDirectory()) fail('invalid_cwd'); } catch { fail('invalid_cwd'); }
-      const name = requestedName ?? `shep-${provider.slice(0,12)}-${randomBytes(5).toString('hex')}`;
-      if (snapshot.agents.some(a => a.name === name)) fail('duplicate_name');
-      if (!await hasExecutable(KINDS.get(provider).executable, pinned.env)) fail('unavailable_provider');
-      const direction = await directionFor(anchor);
-      // Validate the anchor again immediately before changing layout.
-      const beforeSplit = await fresh();
-      if (!beforeSplit.snapshot.panes.some(p => p.pane_id === anchor.pane_id && p.terminal_id === anchor.terminal_id && p.workspace_id === workspaceId && p.tab_id === anchor.tab_id)) fail('changed_target');
-      if (beforeSplit.snapshot.agents.some(a => a.name === name)) fail('duplicate_name');
-      let pane;
-      let stage = 'split';
-      try {
-        const response = await invoke(['pane', 'split', '--pane', anchor.pane_id, '--direction', direction, '--cwd', cwd, '--no-focus']);
-        pane = response.result?.pane;
-        if (!present(pane?.pane_id) || !present(pane?.terminal_id) || pane.pane_id === own.pane_id || pane.terminal_id === own.terminal_id
-          || pane.workspace_id !== workspaceId || pane.tab_id !== anchor.tab_id) fail('invalid_response');
-        const details = { paneId: pane.pane_id, terminalId: pane.terminal_id, agentName: name };
-        stage = 'start';
-        const beforeStart = await fresh();
-        if (!beforeStart.snapshot.panes.some(p => p.pane_id === pane.pane_id && p.terminal_id === pane.terminal_id)) fail('changed_target');
-        const start = await invoke(['agent', 'start', name, '--kind', provider, '--pane', pane.pane_id, '--timeout', '30000'], { timeoutMs: 35000 });
-        const started = start.result?.agent;
-        const target = { ...details, provider, agentName: name };
-        compareAgent(target, started);
-        const current = await checkedAgent(target);
-        if (current.agent.agent_status === 'blocked' || current.agent.interactive_ready !== true || current.agent.launch_pending === true) {
-          return outcome('needs_input', 'The new pane needs attention before receiving a prompt. Review its trust, authentication or approval screen; the prompt was not sent.', { ...details, code: 'agent_not_ready' });
-        }
-        if (!['idle', 'done'].includes(current.agent.agent_status)) {
-          return outcome('uncertain', 'The new agent is not ready for a new prompt. Its pane was kept open; inspect it before submitting work.', { ...details, code: 'agent_not_ready' });
-        }
-        stage = 'prompt';
-        // Herdr takes the first two positional arguments literally, including leading
-        // dashes in text. It does not support an option terminator here. No replay:
-        // a timeout does not prove these bytes were not delivered.
-        const submitted = await invoke(['agent', 'prompt', pane.pane_id, prompt], { timeoutMs: 8000 });
-        compareAgent(target, submitted.result?.agent);
-        return outcome('submitted', 'Prompt submitted. Herdr will report the agent’s live status.', details);
-      } catch (error) {
-        const code = errorCode(error);
-        const details = { code, ...(present(pane?.pane_id) && present(pane?.terminal_id) ? { paneId: pane.pane_id, terminalId: pane.terminal_id, agentName: name } : {}) };
-        if (NEEDS_INPUT.has(code)) return outcome('needs_input', 'The new agent needs attention. Its pane was kept open and the prompt was not sent. Review trust, authentication or approval in that pane.', details);
-        if (UNCERTAIN.has(code) || stage === 'prompt') {
-          return outcome('uncertain', stage === 'split' ? 'Pane creation could not be confirmed. Inspect Herdr before dispatching again; Shep will not retry automatically.'
-            : stage === 'prompt' ? 'Prompt delivery could not be confirmed. The pane was kept open. Inspect it before sending the prompt again.'
-              : 'Agent startup could not be confirmed. The pane was kept open. Inspect it before dispatching again.', details);
-        }
-        return outcome('failed', pane ? `${MESSAGES[code] ?? 'Agent startup failed.'} The new pane was kept open; inspect it before retrying.` : MESSAGES[code] ?? MESSAGES.failed, details);
-      }
+  // Queue waiting never holds a project lock. Active launches serialize only their
+  // target stage per canonical project; startup/prompt can proceed concurrently.
+  function pump() {
+    const limit = Math.max(1, Math.min(4, getConfig()?.concurrency?.maxLaunches ?? 3));
+    while (!disposed && launches < limit && queue.length) {
+      const job = queue.shift(); launches += 1;
+      launch(job).then(job.resolve, error => job.resolve(outcome('failed', messageFor(errorCode(error)), { ...job.ids, code: errorCode(error), stage: 'target' })))
+        .finally(() => { launches -= 1; job.finished = true; pump(); });
+    }
+  }
+
+  function observe(job, stage, details = {}) {
+    job.stage = stage === 'queued' ? 'target' : stage;
+    const event = { ...job.ids, stage, at: timestamp(), ...details };
+    if (!details.noticeRequired) {
+      try { Promise.resolve(job.onProgress?.(event)).catch(() => {}); } catch { /* Observers do not control launches. */ }
+      return Promise.resolve();
+    }
+    if (typeof job.onProgress !== 'function') return Promise.reject(new ControlError('prelaunch_notice_failed'));
+    return new Promise((resolveNotice, reject) => {
+      let done = false;
+      const finish = error => { if (done) return; done = true; clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); error ? reject(error) : resolveNotice(); };
+      const cancel = () => finish(new ControlError('disposed'));
+      const timer = setTimeout(() => finish(new ControlError('prelaunch_notice_failed')), LIMITS.prelaunchNoticeTimeoutMs);
+      abort.signal.addEventListener('abort', cancel, { once: true });
+      if (abort.signal.aborted) return cancel();
+      try { Promise.resolve(job.onProgress(event)).then(() => finish(), () => finish(new ControlError('prelaunch_notice_failed'))); }
+      catch { finish(new ControlError('prelaunch_notice_failed')); }
     });
   }
 
+  async function locked(key, action) {
+    const previous = projectLocks.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    projectLocks.set(key, tail);
+    try { await previous; active(); return await action(); }
+    finally { release(); if (projectLocks.get(key) === tail) projectLocks.delete(key); }
+  }
+
+  function dispatch(request = {}, { onProgress } = {}) {
+    const legacy = !Object.hasOwn(request, 'placement');
+    const ids = { taskId: request.taskId ?? (legacy ? `legacy-${randomHex(8)}` : ''), attemptId: request.attemptId ?? (legacy ? `attempt-${randomHex(8)}` : '') };
+    const captured = structuredClone({ ...request, ...ids });
+    const key = jobKey(captured);
+    if (jobs.has(key)) return jobs.get(key).promise;
+    let resolveJob;
+    const promise = new Promise(resolve => { resolveJob = resolve; });
+    const job = { request: captured, ids, key, onProgress, promise, resolve: resolveJob, legacy, stage: 'target', finished: false, mutated: false };
+    const previous = taskAttempts.get(ids.taskId);
+    try {
+      assertLive();
+      const invalid = validateDispatchRequest(captured);
+      if (invalid.length) fail(invalid[0].code);
+      if (previous && (!previous.finished || previous.result?.state !== 'needs_confirmation' || previous.retried)) fail('busy');
+      if (previous) {
+        const root = previous.trustRoot;
+        if (!root || !trusted(root) || root !== captured.placement?.root) fail('untrusted_repository');
+        previous.retried = true; job.trustRetry = previous;
+      }
+    } catch (error) { return Promise.resolve(outcome('failed', messageFor(errorCode(error)), { ...ids, code: errorCode(error), stage: 'target' })); }
+    jobs.set(key, job); taskAttempts.set(ids.taskId, job);
+    void observe(job, 'queued'); queue.push(job); pump();
+    return promise;
+  }
+
   async function focus(target) {
-    return exclusive(async () => {
+    return operation(target, async () => {
       const initial = await fresh();
       checkTarget(target, initial.own);
       if (!initial.snapshot.panes.some(p => p.pane_id === target.paneId && p.terminal_id === target.terminalId)) fail('changed_target');
@@ -278,7 +315,7 @@ export function createController({ context, monitor, mode = 'live', run, readRaw
   }
 
   async function closeAgent(target) {
-    return exclusive(async () => {
+    return operation(target, async () => {
       await checkedAgent(target, true);
       let commandError;
       try { await invoke(['pane', 'close', target.paneId]); } catch (error) { commandError = error; }
@@ -293,10 +330,60 @@ export function createController({ context, monitor, mode = 'live', run, readRaw
     });
   }
 
+  async function followUp({ target, text } = {}) {
+    return operation(target, async () => {
+      if (validatePrompt(text).length) fail('invalid_prompt');
+      const { agent } = await checkedAgent(target);
+      if (agent.agent_status === 'blocked') return outcome('needs_input', DISPATCH_MESSAGES.blockedFollowUp, { code: 'agent_blocked', paneId: target.paneId, terminalId: target.terminalId });
+      try {
+        const response = await invoke(['agent', 'prompt', target.paneId, text], { timeoutMs: LIMITS.followUpTimeoutMs });
+        compareAgent(target, response.result?.agent);
+        return outcome('submitted', 'Follow-up submitted.', { paneId: target.paneId, terminalId: target.terminalId });
+      } catch (error) {
+        const code = errorCode(error);
+        return outcome(code === 'agent_blocked' ? 'needs_input' : 'uncertain', code === 'agent_blocked' ? DISPATCH_MESSAGES.blockedFollowUp : 'Follow-up delivery could not be confirmed. Inspect the agent before sending it again.', { code, paneId: target.paneId, terminalId: target.terminalId });
+      }
+    });
+  }
+
+  async function notify({ title, body, sound = 'none' } = {}) {
+    try {
+      assertLive();
+      if (!present(title) || !['none', 'done', 'request'].includes(sound)) fail('invalid_request');
+      await invoke(['notification', 'show', safeText(title), ...(body !== undefined ? ['--body', safeText(body)] : []), '--sound', sound]);
+    } catch {
+      if (!notificationFailed && !disposed) {
+        notificationFailed = true;
+        try { Promise.resolve(onNotice?.('Herdr notifications could not be delivered. Check the task board for status.')).catch(() => {}); } catch { /* Optional notice. */ }
+      }
+    }
+  }
+
+  function dismissTask(request) {
+    const key = jobKey(request ?? {}), job = jobs.get(key);
+    if (!job || !job.finished) return outcome('failed', MESSAGES.busy, { code: 'busy' });
+    reservations.delete(key);
+    return outcome('dismissed', 'The local reservation was released. Created resources were kept.');
+  }
+
   function dispose() {
     disposed = true;
     abort.abort();
+    for (const job of queue.splice(0)) {
+      job.finished = true;
+      job.result = outcome('failed', MESSAGES.disposed, { ...job.ids, stage: 'target', code: 'disposed' });
+      job.resolve(job.result);
+    }
   }
 
-  return { getProfiles, dispatch, focus, closeAgent, dispose };
+  const targetService = createTargetService({ abort, active, assertLive, fresh, getControlSnapshot, invoke, directionFor, locked,
+    registry, gitRead, fs, pinned, trusted, reservations, receipts, operationLocks, observe, randomHex, getConfig,
+    fail, ControlError, errorCode, present });
+  const launch = createLaunchRunner({ assertLive, hasExecutable, KINDS, pinned, fail, randomHex,
+    ...targetService, observe, fresh, operationLocks, invoke, compareAgent, checkedAgent, outcome,
+    reservations, errorCode, trusted, NEEDS_INPUT, UNCERTAIN, messageFor });
+  const { listWorktrees, removeWorktree } = createCleanupOperations({ assertLive, directory: targetService.directory,
+    invoke, trusted, fail, operation, receipts, pinned, locked, getControlSnapshot, fs, outcome,
+    operationLocks, jobs, UNCERTAIN, errorCode, messageFor, reservations });
+  return { getProfiles, getControlSnapshot, dispatch, focus, closeAgent, followUp, notify, listWorktrees, removeWorktree, dismissTask, dispose };
 }
