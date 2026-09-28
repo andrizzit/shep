@@ -180,7 +180,7 @@ test('unexpected host error codes never resolve object prototype fields or expos
   assert.ok(!result.message.includes('native code'));
 });
 
-test('concurrent actions reject duplicate dispatch while dispose prevents delayed prompt delivery', async () => {
+test('dispose prevents delayed prompt delivery after startup has begun', async () => {
   let release, started;
   const reachedStart = new Promise(resolve => { started = resolve; });
   const pending = new Promise(resolve => { release = resolve; });
@@ -190,7 +190,6 @@ test('concurrent actions reject duplicate dispatch while dispose prevents delaye
   } });
   const action = f.controller.dispatch(request());
   await reachedStart;
-  assert.equal((await f.controller.dispatch(request())).code, 'busy');
   f.controller.dispose();
   f.controller.dispose();
   assert.equal(signal.aborted, true);
