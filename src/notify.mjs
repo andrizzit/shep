@@ -24,20 +24,25 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
     const current = new Map();
     for (const task of tracked) {
       const agent = snapshot.agents?.find(a => a.paneId === task.target?.paneId && a.terminalId === task.target?.terminalId);
-      const value = { status: agent?.status ?? 'unknown', launch: task.launch?.state, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
+      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), launch: task.launch?.state, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
       current.set(task.id, value);
       const old = previous.get(task.id);
       if (!baseline || !value.paneId || !value.terminalId) continue;
       const setup = value.launch === 'needs_input' && old?.launch !== 'needs_input';
-      const firstCompletion = value.launch === 'submitted' && !old?.paneId && ['done', 'idle'].includes(value.status);
-      if (!setup && !firstCompletion && (!old || old.paneId !== value.paneId || old.terminalId !== value.terminalId)) continue;
+      const sameTarget = old?.paneId === value.paneId && old?.terminalId === value.terminalId;
+      // An idle shell may precede execution. Only a real agent's done status
+      // supports first-observation completion; synthetic unknown is no evidence.
+      const firstCompletion = value.launch === 'submitted' && value.observed && value.status === 'done'
+        && (!old?.paneId || (sameTarget && !old.observed));
+      if (!setup && !firstCompletion && !sameTarget) continue;
       let transition, title, body = task.label, sound;
       const label = `${safeText(task.project)} · ${safeText(names.get(task.provider) ?? task.provider ?? 'Agent')}`;
       if (setup) {
         transition = 'setup'; title = `⚠ ${label} needs setup`; body = task.launch.message; sound = 'request';
       } else if (old?.status !== 'blocked' && value.status === 'blocked') {
         transition = 'blocked'; title = `⚠ ${label} needs input`; sound = 'request';
-      } else if (firstCompletion || (['working', 'unknown'].includes(old?.status) && ['done', 'idle'].includes(value.status))) {
+      } else if (firstCompletion || (sameTarget && old.observed && value.observed
+        && ['working', 'unknown'].includes(old.status) && ['done', 'idle'].includes(value.status))) {
         transition = 'finished'; title = `✓ ${label} finished`; sound = 'done';
       }
       const time = Number(now()), key = `${task.id}\0${transition}`;
