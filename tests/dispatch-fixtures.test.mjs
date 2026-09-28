@@ -364,3 +364,31 @@ test('D0 all named modes remain explicit and synthetic', async t => {
   assert.equal((await dirty.run(['worktree', 'remove', '--workspace', created.workspace.workspace_id, '--force'])).result.forced, true);
   assert.equal((await dirty.read()).worktrees.length, 0);
 });
+
+test('G3 synthetic worktree path stays owned and optional without changing argv or creating folders', async t => {
+  const fixture = await host(t);
+  const base = ['worktree', 'create', '--cwd', '/fixture/repo', '--branch', 'shep/literal-branch-1234', '--base', 'a'.repeat(40), '--no-focus'];
+  const defaultResult = (await fixture.run(base)).result;
+  assert.equal(defaultResult.worktree.path, '/fixture/worktrees/worktree-10');
+
+  const configured = join(fixture.directory.root, 'configured-checkout');
+  await writeFile(fixture.script, JSON.stringify({ version: 1, worktreePath: configured }));
+  const configuredResult = (await fixture.run(base)).result;
+  assert.equal(configuredResult.worktree.path, configured);
+  assert.equal(configuredResult.workspace.worktree.checkout_path, configured);
+  assert.equal(configuredResult.root_pane.cwd, configured);
+  assert.equal(configuredResult.root_pane.foreground_cwd, configured);
+  assert.equal(configuredResult.worktree.branch, 'shep/literal-branch-1234');
+  await assert.rejects(stat(configured), { code: 'ENOENT' });
+
+  const explicit = join(fixture.directory.root, 'explicit-checkout');
+  const explicitArgs = [...base, '--path', explicit];
+  const explicitResult = (await fixture.run(explicitArgs)).result;
+  assert.equal(explicitResult.worktree.path, explicit);
+  assert.equal(explicitResult.workspace.worktree.checkout_path, explicit);
+  assert.equal(explicitResult.root_pane.cwd, explicit);
+  assert.equal(explicitResult.worktree.branch, 'shep/literal-branch-1234');
+  await assert.rejects(stat(explicit), { code: 'ENOENT' });
+  assert.deepEqual((await fixture.calls()).map(call => call.args), [base, base, explicitArgs]);
+  assert.equal(new Set([defaultResult, configuredResult, explicitResult].map(result => result.root_pane.terminal_id)).size, 3);
+});

@@ -38,7 +38,7 @@ if (dispatcherModes.has(mode)) {
 
 // Controlled scenarios are synthetic. Native Herdr 0.9.1 qualification is recorded
 // in SPIKE_FACTS and the spike evidence; fixture_ errors are explicitly invented.
-// Scenario v1: {snapshot?, worktreeSource?, steps:[{id?, match:argv|{prefix:argv},
+// Scenario v1: {snapshot?, worktreeSource?, worktreePath?, steps:[{id?, match:argv|{prefix:argv},
 // times?, effect?:'default', snapshot?, result?, error?, stdout?, exitCode?,
 // signalPath?, barrierPath?, barrierTimeoutMs?, delayMs?}]}.
 // A step has NO default mutation unless effect:'default'; it can acknowledge,
@@ -185,7 +185,7 @@ async function dispatcherMain() {
       }
       let cwd = flag('--cwd', '/fixture/repo');
       if (command === 'worktree create') {
-        cwd = flag('--path', `/fixture/worktrees/worktree-${id}`);
+        cwd = flag('--path', scenario.worktreePath ?? `/fixture/worktrees/worktree-${id}`);
         worktree = { path: cwd, branch: flag('--branch', `shep/fixture-${id}`), label: flag('--label', 'Synthetic worktree'),
           open_workspace_id: currentWorkspace.workspace_id, is_bare: false, is_detached: false, is_prunable: false, is_linked_worktree: true };
         state.worktrees.push(worktree);
