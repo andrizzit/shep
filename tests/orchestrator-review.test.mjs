@@ -25,10 +25,27 @@ before(async () => {
 after(async () => { if (temporary) await rm(temporary, { recursive: true, force: true }); });
 
 let installed;
+async function isolatedFixtureEnvironment(directory) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:HERDR_|SHEP_|XDG_|GIT_|NPM_CONFIG_)/i.test(key)
+    && !['HOME', 'USERPROFILE', 'NODE_OPTIONS', 'INIT_CWD'].includes(key)));
+  const paths = {
+    HOME: join(directory, 'home'), XDG_CONFIG_HOME: join(directory, 'config'),
+    XDG_STATE_HOME: join(directory, 'state'), XDG_DATA_HOME: join(directory, 'data'),
+    XDG_CACHE_HOME: join(directory, 'cache'), XDG_RUNTIME_DIR: join(directory, 'runtime'),
+  };
+  await Promise.all(Object.values(paths).map(path => mkdir(path, { recursive: true, mode: 0o700 })));
+  const userConfig = join(paths.HOME, '.npmrc'), globalConfig = join(paths.HOME, 'npm-global.rc');
+  await Promise.all([writeFile(userConfig, ''), writeFile(globalConfig, '')]);
+  return { ...env, ...paths, USERPROFILE: paths.HOME, PWD: directory,
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    npm_config_userconfig: userConfig, npm_config_globalconfig: globalConfig,
+    npm_config_cache: join(paths.XDG_CACHE_HOME, 'npm') };
+}
+
 async function installedCommand() {
   if (installed) return installed;
   const prefix = join(temporary, 'installed app');
-  const env = { ...process.env, npm_config_cache: join(temporary, 'npm-cache') };
+  const env = await isolatedFixtureEnvironment(join(temporary, 'package-environment'));
   const packed = await execute('npm', ['pack', '--json', '--pack-destination', temporary], { cwd: project, env, timeout: 60000 });
   const [artifact] = JSON.parse(packed.stdout);
   await execute('npm', ['install', '--prefix', prefix, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', join(temporary, artifact.filename)], {
@@ -120,12 +137,17 @@ async function transportFixture() {
   await atomicJson(statePath, { snapshot: raw.result.snapshot, nextPane: 9, holdStart: false });
   await writeFile(logPath, '');
   await writeFile(binary, '#!/usr/bin/env node\n(' + fakeHerdrMain.toString() + ')();\n', { mode: 0o755 });
-  const env = controllerFixture().context.env;
-  Object.assign(env, { HERDR_BIN_PATH: binary, ORCHESTRATOR_QA_STATE: statePath, ORCHESTRATOR_QA_LOG: logPath,
+  const env = await isolatedFixtureEnvironment(directory);
+  Object.assign(env, {
+    HERDR_ENV: '1', HERDR_BIN_PATH: binary, HERDR_SOCKET_PATH: join(directory, 'current.sock'),
+    HERDR_PANE_ID: ownPane.pane_id, HERDR_TAB_ID: ownPane.tab_id, HERDR_WORKSPACE_ID: ownPane.workspace_id,
+    PATH: executables + delimiter + (env.PATH || ''), ORCHESTRATOR_QA_STATE: statePath, ORCHESTRATOR_QA_LOG: logPath,
     TERM: 'xterm-256color', FORCE_COLOR: '1', CI: '' });
   delete env.NO_COLOR;
   return {
     directory, env, statePath,
+    configPath: join(env.XDG_CONFIG_HOME, 'shep', 'config.json'),
+    historyPath: join(env.XDG_STATE_HOME, 'shep', 'history.jsonl'),
     calls: async () => (await readFile(logPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
     readState: async () => JSON.parse(await readFile(statePath, 'utf8')),
     setState: value => atomicJson(statePath, value),
