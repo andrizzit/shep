@@ -104,7 +104,11 @@ Type a command in Shep and press **Enter**:
 
 The `provider:` and `@project` parts are optional. `/dispatch your task` always uses **Codex** in the context project; `/dispatch claude: your task` keeps working. Use `/dispatch claude@folio/src/api: your task` to request a project subfolder. Unknown or unavailable providers and ambiguous projects produce an error before launch. **Tab** accepts a suggestion; **Enter** submits the command. Up/Down recalls commands from this run.
 
-Press **n** for the composer: provider, project or **Other folder…**, subfolder, optional name and multiline prompt. Use **Tab** to move between fields. Review the proposed location before dispatch. Herdr starts a worktree at its repository root; when a requested subfolder cannot apply, Shep shows that notice before launch. Authentication and agent dialogs stay in the agent's pane and are never answered by Shep.
+Press **n** for the composer: provider, project or **Other folder…**, subfolder, optional name and multiline prompt. Use **Tab** to move between fields. Review the proposed location before dispatch. Herdr starts a worktree at its repository root; when a requested subfolder cannot apply, Shep shows that notice before launch.
+
+Use `/dispatch codex@shep+here: your task` to keep a task in the main checkout even when another agent is working there. You are choosing to share that checkout, so coordinate edits. Task details show an automatically created worktree's path and its manual removal command, `herdr worktree remove --workspace <id>`. Review and preserve its changes before removing it. The **W** cleanup action is the first planned post-checkpoint item; `+wt`, fan-out, named profiles and templates remain deferred.
+
+**Known sign-in limitation:** if an agent needs sign-in, Shep may submit the task into that screen, as 0.3.0 does. Herdr's readiness signal does not guarantee that authentication is complete. Sign in before dispatching; if setup appears, inspect the created pane before sending anything again. Shep does not add authentication handling or screen parsing.
 
 Press **g** to switch between Tasks grouped by project and Agents grouped by provider. Tasks and drafts last only for this run. After restarting, still-running agents appear in the Agents view.
 

@@ -95,9 +95,13 @@ Each accepted dispatch creates a **new agent in its own Herdr tab**, reusing the
 
 When another agent is working in the same Git checkout, Shep uses a new worktree. Herdr starts a worktree's agent at its repository root. If you requested a subfolder, both the preview and a notice before launch explain that it will not apply. Inspect the actual working directory and branch in the task detail. Automatic placement relies on Herdr's current state; it is not a guarantee that another process will never edit the same files.
 
+To deliberately share the main checkout, use `/dispatch codex@shep+here: your task`. The `+here` override skips automatic worktree isolation, so coordinate edits with the other agents. Forced worktrees (`+wt`), fan-out, named profiles and templates remain deferred.
+
 If Git rejects a repository for dubious ownership, Shep can ask you to trust that exact canonical root. Cancel is the default. Confirmation is saved in Shep's config and applies only to that repository. Agent authentication and provider trust dialogs still require your attention in the created pane.
 
 Shep starts the provider through Herdr, checks readiness, and submits the prompt. Wait for the result message before issuing another dispatch. Once submission completes, you can dispatch another task while the first agent continues working.
+
+**Known sign-in limitation:** if an agent needs sign-in, Shep may submit the task into that screen, as 0.3.0 does. Complete sign-in before dispatching. If setup appears, inspect the created pane before sending anything again; successful submission does not prove the task was accepted. Shep does not add authentication handling or screen parsing.
 
 **Expected result:** a submitted task with a pane ID in the Tasks view, plus the agent in its provider group. Submission confirms delivery; inspect subsequent status and output to confirm the agent actually worked on the task. Tab accepts a command/provider/project suggestion; Enter submits. Up/Down recalls single-line commands from this run.
 
@@ -205,7 +209,9 @@ If pane creation itself was uncertain, inspect Herdr for an extra pane before re
 7. Press **y** or click **Close agent** to confirm. Press **Esc** to cancel. The initial keyboard choice is Cancel.
 8. Confirm the agent disappears from Shep and its Herdr pane closes.
 
-Closing ends the selected pane's process. The **x** action also works for agents that Shep did not launch, with the same identity checks and default-Cancel confirmation. It does not revert files, commit work, delete branches, or clean up worktrees. Keep any output you need before closing. Worktree cleanup controls are deferred.
+Closing ends the selected pane's process. The **x** action also works for agents that Shep did not launch, with the same identity checks and default-Cancel confirmation. It does not revert files, commit work, delete branches, or clean up worktrees. Keep any output you need before closing.
+
+For a worktree created by the task, its detail view shows the full worktree path and the manual command `herdr worktree remove --workspace <id>` with the actual workspace ID. Review and preserve changes before running that command yourself. Shep does not run it for you. The **W** cleanup action is the first planned post-checkpoint item.
 
 If the target or its status changed while the dialog was open, Shep can refuse the close. Cancel, inspect the current agent, and start a new confirmation. A Done or Idle status is a cue to review; Shep does not automatically close agents.
 
