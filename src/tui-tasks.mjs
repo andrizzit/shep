@@ -19,7 +19,7 @@ export function deferredCommand(command) {
   if (!prefix) return null;
   const agent = prefix.split('@')[0].split('+')[0];
   if (agent.includes(',') || agent.includes('.')) return 'Named profiles and multiple agents are not enabled. Choose one provider, optionally @project.';
-  if (prefix.includes('+')) return 'Explicit placement modes are not enabled. Shep selects isolation automatically.';
+  if (prefix.includes('+') && prefix.slice(prefix.indexOf('+') + 1) !== 'here') return 'Only +here is enabled in this checkpoint; +wt remains deferred. Omit the mode for automatic isolation.';
   return null;
 }
 
@@ -27,7 +27,10 @@ export function commandSuggestions(command, cursor, context) {
   if (!/^\/[^\s]*$/.test(command) && deferredCommand(command)) return [];
   command = command.replace(/^\/dispatch(?=[ \t]|$)/i, '/dispatch');
   const before = command.slice(0, cursor);
-  if (/^\/dispatch[ \t]+[^\s:]*[+,]/.test(before) || /^\/dispatch[ \t]+[^@\s:]*\./.test(before)) return [];
+  const prefix = /^\/dispatch[ \t]+([^\s:]*)$/.exec(before)?.[1];
+  const agent = prefix?.split('@')[0].split('+')[0];
+  if (agent?.includes(',') || agent?.includes('.')) return [];
+  if (prefix?.includes('+')) return suggest(command, cursor, context).filter(item => item.value === 'here');
   return suggest(command, cursor, context).filter(item => !/^\/(?!dispatch$)/.test(item.label));
 }
 
@@ -115,7 +118,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     if (nameInput && !/^[a-z][a-z0-9_-]{0,31}$/.test(nameInput)) { inform('Names start with a-z and use a-z, 0-9, _ or -; maximum 32 characters.', 'warning'); return; }
     const args = [...(config().agents?.[provider.id]?.args || [])];
     if (validateArgs(args).length) { inform('The configured provider arguments are invalid. Check configuration and use Ctrl+R.', 'warning'); return; }
-    const intent = { projectKey: spec.project.key, root: spec.project.root, mode: 'auto', subfolder: spec.subfolder,
+    const intent = { projectKey: spec.project.key, root: spec.project.root, mode: spec.modeIntent, subfolder: spec.subfolder,
       label: tabLabel(spec.inputTask), placementStyle: config().placement || 'tab' };
     const invalid = validatePlacementIntent(intent);
     if (invalid.length) { inform('The subfolder must be relative and stay inside the selected project.', 'warning'); return; }

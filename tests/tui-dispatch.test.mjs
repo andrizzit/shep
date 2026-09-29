@@ -6,7 +6,8 @@ import { stripVTControlCharacters } from 'node:util';
 import { renderToString } from 'ink';
 import { createTuiModel } from '../src/tui-model.mjs';
 import { TuiView, noticeLines, startTui } from '../src/tui.mjs';
-import { deferredCommand, displayArgs } from '../src/tui-tasks.mjs';
+import { deferredCommand, displayArgs, commandSuggestions } from '../src/tui-tasks.mjs';
+import { resolvePlacement } from '../src/placement.mjs';
 import { DEFAULT_CONFIG } from '../src/dispatch/contracts.mjs';
 import { createFakeRegistry, makeProject, deferred } from './helpers/dispatch-fakes.mjs';
 
@@ -349,4 +350,108 @@ test('ordinary long diagnostics have a full scrollable notice without losing the
   assert.match(text, /NOTICE.*full message/); assert.match(text, /must contain valid JSON/); assert.match(text, /Back Esc/);
   model.key('', { downArrow: true }); assert.equal(model.getSnapshot().detailOffset, 1);
   model.key('', { escape: true }); model.action('command'); assert.equal(model.getSnapshot().command, '/dispatch preserved');
+});
+
+test('+here reaches placement despite a busy checkout, preserves literal text, and never changes the auto default', async t => {
+  const requests = [], plans = [];
+  const busySnapshot = { agents: [{ agent: 'codex', agent_status: 'working', canonical_cwd: project.root }], workspaces: [], panes: [] };
+  const { model } = await setup({ controller: {
+    getProfiles: async () => ({ providers: ['codex', 'claude'].map(id => ({ id, name: id, available: true })), workspaces: [], defaultCwd: project.root + '/src/api' }),
+    dispatch: async (request, { onProgress }) => {
+      requests.push(request); plans.push(resolvePlacement({ intent: request.placement, project, snapshot: busySnapshot }));
+      onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
+      return { ok: true, state: 'submitted', message: 'Sent', taskId: request.taskId, attemptId: request.attemptId };
+    },
+  } }); t.after(model.destroy);
+  const prompt = ' keep +wt, .fast and /test literal\n$(no-shell)';
+  model.paste('/dispatch claude+here: ' + prompt); model.key('', { return: true }); await tick();
+  assert.equal(requests.length, 1); assert.equal(requests[0].provider, 'claude');
+  assert.equal(requests[0].prompt, prompt); assert.equal(requests[0].inputTask, prompt);
+  assert.equal(requests[0].placement.mode, 'here'); assert.equal(requests[0].placement.subfolder, 'src/api');
+  assert.equal(plans[0].mode, 'here'); assert.equal(plans[0].cwd, project.root + '/src/api');
+  assert.equal(model.getTasks()[0].modeIntent, 'here'); assert.equal(model.getSnapshot().decision, null);
+
+  model.paste('/dispatch @sh+here: explicit project'); model.key('', { return: true }); await tick();
+  assert.equal(requests[1].provider, 'codex'); assert.equal(requests[1].placement.mode, 'here');
+  assert.equal(requests[1].placement.subfolder, ''); assert.equal(plans[1].cwd, project.root);
+  model.paste('/dispatch ordinary default'); model.key('', { return: true }); await tick();
+  assert.equal(requests[2].placement.mode, 'auto'); assert.equal(plans[2].mode, 'worktree');
+});
+
+test('+here completion exposes no deferred mode or agent workflows', async t => {
+  const context = { providers: [{ id: 'codex', name: 'Codex', available: true }], projects: [project], config: DEFAULT_CONFIG };
+  for (const command of ['/dispatch codex+', '/dispatch codex@sh+h', '/dispatch @sh+']) {
+    const suggestions = commandSuggestions(command, command.length, context);
+    assert.deepEqual(suggestions.map(item => item.value), ['here']);
+  }
+  for (const command of ['/dispatch codex+wt', '/dispatch codex.fast+', '/dispatch codex,claude+']) {
+    assert.deepEqual(commandSuggestions(command, command.length, context), []);
+  }
+  const { model, calls } = await setup(); t.after(model.destroy);
+  for (const command of ['/dispatch codex.fast+here: task', '/dispatch codex,claude+here: task', '/test codex+here: task', '/dispatch codex@sh+wt: task']) {
+    model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
+    assert.match(model.getSnapshot().notice.message, /checkpoint|not enabled/);
+    assert.equal(model.getSnapshot().command, command);
+  }
+  assert.equal(calls.length, 0); assert.equal(model.getTasks().length, 0);
+});
+
+// Read each content row through the real keyboard-scrollable detail at the
+// physical40×15 minimum (39×14 content), retaining wrapped rows in order.
+function readCompactDetail(model) {
+  model.action('details');
+  const content = [];
+  for (let count = 0; count < 200; count += 1) {
+    const rendered = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 39, height: 14 }));
+    const rows = rendered.split('\n');
+    const title = rows.findIndex(row => row.includes('│ TASK ·'));
+    const position = rendered.match(/(\d+)–(\d+)\/(\d+)/);
+    assert(position, 'Task detail must expose its scroll position');
+    assert(rows.length <= 14); assert.match(rendered, /Back Esc/);
+    const [, first, last, total] = position.map(Number);
+    for (let index = first; index <= last; index += 1) content[index - 1] = rows[title + index - first + 1].slice(2, -2).trimEnd();
+    if (last === total) return content.join('');
+    model.key('', { downArrow: true });
+  }
+  assert.fail('The complete task detail was not reachable by scrolling');
+}
+
+test('created worktree detail exposes its full path and safe manual command at minimum size without cleanup', async t => {
+  for (const workspaceId of ['w23', "w'23;$(no-shell)"]) {
+    const checkout = '/fixture/shep-worktrees/' + 'long-directory/'.repeat(8) + 'actual-checkout';
+    const baseCommit = 'a'.repeat(40); let cleanup = 0;
+    const { model } = await setup({ controller: {
+      dispatch: async (request, { onProgress }) => {
+        onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
+        return { ok: true, state: 'submitted', message: 'Sent', taskId: request.taskId, attemptId: request.attemptId,
+          paneId: 'created-pane', terminalId: 'created-terminal',
+          placement: { mode: 'worktree', targetKind: 'worktree', reason: 'Busy checkout', cwd: checkout, notices: [], workspaceId, baseCommit },
+          created: { workspaceId, tabIds: ['created-tab'], panes: [{ paneId: 'created-pane', terminalId: 'created-terminal', tabId: 'created-tab', workspaceId }],
+            worktree: { workspaceId, repoCwd: project.root, path: checkout, branch: 'shep/task-abcd', baseCommit } } };
+      }, removeWorktree: async () => { cleanup += 1; }, closeAgent: async () => { cleanup += 1; },
+    } }); t.after(model.destroy);
+    model.paste('/dispatch task'); model.key('', { return: true }); await tick();
+    const text = readCompactDetail(model);
+    assert(text.includes('Worktree path: ' + checkout), 'The confirmed full path must remain accessible');
+    assert(text.includes('Manual removal in current Herdr instance:'));
+    const argument = workspaceId === 'w23' ? 'w23' : "'w'\\''23;$(no-shell)'";
+    assert(text.includes('herdr worktree remove --workspace ' + argument));
+    assert.doesNotMatch(text, /--force|--trust-repository/);
+    model.key('W'); model.key('', { escape: true }); assert.equal(cleanup, 0);
+  }
+});
+
+test('placement or discovery alone never produces a manual removal command', async t => {
+  const registry = createFakeRegistry({ projects: [makeProject({ worktrees: [{ path: '/fixture/existing-checkout', branch: 'user-owned', workspaceId: 'existing' }] })] });
+  const { model } = await setup({ registry, controller: {
+    dispatch: async (request, { onProgress }) => {
+      onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
+      return { ok: true, state: 'submitted', message: 'Sent', taskId: request.taskId, attemptId: request.attemptId,
+        placement: { mode: 'worktree', targetKind: 'worktree', reason: 'Existing checkout', cwd: '/fixture/existing-checkout', notices: [], workspaceId: 'existing', baseCommit: 'a'.repeat(40) } };
+    },
+  } }); t.after(model.destroy);
+  model.paste('/dispatch task'); model.key('', { return: true }); await tick();
+  const text = readCompactDetail(model);
+  assert.match(text, /Actual cwd: \/fixture\/existing-checkout/);
+  assert.doesNotMatch(text, /herdr worktree remove|Manual removal/);
 });

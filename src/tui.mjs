@@ -134,11 +134,16 @@ function TaskDetail(props) {
 }
 function OwnedTaskDetail({ state, model, width, height, registry, row }) {
   const task = row.task;
+  const createdWorktree = task.created?.worktree;
+  const worktree = createdWorktree && createdWorktree.workspaceId === task.created.workspaceId ? createdWorktree : null;
+  // This is a copyable command only. Use the response-confirmed creation
+  // receipt, never infer ownership from a discovered path or placement mode.
+  const workspaceArg = worktree && (/^[\w:.-]+$/.test(worktree.workspaceId) ? worktree.workspaceId : `'${worktree.workspaceId.replaceAll("'", "'\\''")}'`);
   const content = [task.inputTask, '', `${providerName(task.agent.provider)} · ${TASK_LABELS[row.status]} · ${elapsed(row.elapsedMs)}`,
     `Project: ${task.project.name}`, task.project.root, `Requested subfolder: ${task.subfolder || '(root)'}`,
     `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Automatic · awaiting target'}`,
     `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
-    ...(task.created?.worktree?.branch ? [`Branch: ${task.created.worktree.branch}`] : []),
+    ...(worktree ? [`Branch: ${worktree.branch}`, `Worktree path: ${worktree.path}`, 'Manual removal in current Herdr instance:', `herdr worktree remove --workspace ${workspaceArg}`] : []),
     `Launch: ${task.launch.state} · ${task.launch.message}`, `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`,
     ...(task.locationNotice ? ['Location notice (exact):', task.locationNotice.event.message, `Full subfolder: ${task.locationNotice.subfolder}`] : []),
     summaryLabel(task.summary), ...(task.summary?.at ? [`Checked: ${task.summary.at}`] : []), ...(task.summary?.message ? [task.summary.message] : [])];
@@ -383,7 +388,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
   const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n Setup → Project'}`;
-  const commandValue = state.command || '/dispatch [agent][@project]: task · default Codex';
+  const commandValue = state.command || '/dispatch [agent][@project][+here]: task · default Codex';
   const commandDisplay = state.view === 'command' ? editorLines(state.command, state.cursor.command, Math.max(4, width - (width < 70 ? 4 : 10)), 1)[0] : commandValue;
   return h(Box, { width, height, flexDirection: 'column', backgroundColor: C.canvas, overflow: 'hidden' },
     h(Box, { height: headerHeight, flexShrink: 0, alignItems: compact ? 'flex-start' : 'center', gap: 1 },
