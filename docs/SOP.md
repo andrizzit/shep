@@ -69,7 +69,7 @@ Other examples:
 The syntax is:
 
 ```text
-/dispatch [provider][@project[/subfolder]]: task description
+/dispatch [provider][@project[/subfolder]][+here]: task description
 /dispatch task description
 ```
 

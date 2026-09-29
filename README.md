@@ -130,7 +130,7 @@ Open `~/.config/shep/config.json` (or `$XDG_CONFIG_HOME/shep/config.json`) and a
 
 If the file already contains settings, merge this section into it instead of replacing the file. Restart Shep or reload configuration from the composer. Discovery roots default to empty. Open workspaces also contribute projects; the picker offers **Other folder…** for an existing folder outside your registered projects. Configured roots are scanned with bounds, not recursively without limit.
 
-Shep only persists a configuration change when you explicitly confirm trust for an exact repository. It never trusts every repository or answers an agent's trust dialog. To turn off notifications, add `"notifications":{"enabled":false}` to your config; `"sound":false` keeps them silent. Notifications cover Shep tasks by default and suppress alerts for an agent you are already viewing.
+Shep only persists a configuration change when you explicitly confirm trust for an exact repository. It grants no blanket repository trust and adds no handling for agent trust dialogs. To turn off notifications, add `"notifications":{"enabled":false}` to your config; `"sound":false` keeps them silent. Notifications cover Shep tasks by default and suppress alerts for an agent you are already viewing.
 
 ![Shep terminal board with sample agents](docs/images/shep-terminal.png)
 
