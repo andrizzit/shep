@@ -689,7 +689,7 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
     ['/dispatch claude: fix the ledger', 'claude', 'fix the ledger'],
     ['/dispatch fix the settings pange', 'codex', 'fix the settings pange'],
     ['/dispatch grok: write the docker compose file', 'grok', 'write the docker compose file'],
-    ['/dispatch claude explain this fixture', 'codex', 'claude explain this fixture'],
+    ['/dispatch claude explain this fixture', 'claude', 'explain this fixture'],
     ['/dispatch add voice input to shep', 'codex', 'add voice input to shep'],
     ['/dispatch claude: ' + literal, 'claude', literal],
   ];

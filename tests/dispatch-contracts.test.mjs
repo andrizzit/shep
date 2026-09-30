@@ -58,8 +58,11 @@ test('D0 compatibility: existing parser still preserves the frozen legacy litera
   for (const id of legacy) assert.ok(vectors.cases.some(vector => vector.id === id), `Missing legacy vector: ${id}`);
   for (const vector of vectors.cases.filter(item => legacy.has(item.id))) {
     const parsed = parseDispatch(vector.input, vectors.context.providers);
-    assert.equal(parsed.provider, vector.expected.agents[0].provider, vector.id);
-    assert.equal(parsed.prompt, vector.expected.task, vector.id);
+    const expected = vector.id === 'provider-word-is-task'
+      ? { provider: 'codex', prompt: 'claude review this code' }
+      : { provider: vector.expected.agents[0].provider, prompt: vector.expected.task };
+    assert.equal(parsed.provider, expected.provider, vector.id);
+    assert.equal(parsed.prompt, expected.prompt, vector.id);
   }
 });
 

@@ -7,7 +7,7 @@
 
 Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
 
-This branch provides **0.4.0-checkpoint.2**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, follow-ups from Shep, worktree cleanup controls and additional shell subcommands are deferred.
+This branch provides **0.4.0-checkpoint.3**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
@@ -24,7 +24,8 @@ For the full daily workflow, read the [Shep operating procedure](docs/SOP.md): d
 - Offers a project picker, command suggestions and command recall for the current run.
 - Groups tasks by project, shows Git change summaries and sends Herdr notifications when a task finishes or needs input.
 - Groups agents by provider, including Claude, Codex, Grok, Kiro, and additional types reported by Herdr.
-- Lets you select agents with arrow keys or a mouse, focus their real panes, and confirm closing them.
+- Lets you select agents with arrow keys or a mouse, focus their real panes, send follow-ups and confirm closing them.
+- Clears closed or failed task rows on request, without removing panes, files or worktrees.
 - Shows which agents are working, waiting for input, done, idle, or unknown.
 - Displays each agent's workspace and working directory across the current Herdr session.
 - Supports search and keyboard navigation in the terminal, plus search and status filters in the browser companion.
@@ -63,7 +64,7 @@ The public default branch may still be 0.3.0 while this preview is unpushed. To 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.2.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.3.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -102,7 +103,9 @@ Type a command in Shep and press **Enter**:
 /dispatch review the current changes
 ```
 
-The `provider:` and `@project` parts are optional. `/dispatch your task` always uses **Codex** in the context project; `/dispatch claude: your task` keeps working. Use `/dispatch claude@folio/src/api: your task` to request a project subfolder. Unknown or unavailable providers and ambiguous projects produce an error before launch. **Tab** accepts a suggestion; **Enter** submits the command. Up/Down recalls commands from this run.
+A clear prefix can omit the colon: `/dispatch claude@folio add unit tests`, `/dispatch @folio fix the title`, or `/dispatch claude review this`. A prefix without a colon requires a lowercase installed provider and/or a known project. Capitalized words, unavailable providers, unknown projects and file mentions such as `@src/app.ts` stay literal task text for **Codex**. Use `/dispatch codex: claude said X` when the task starts with a provider name. Colon forms keep their strict errors for unknown or unavailable providers and ambiguous projects. `+here` works with either form; profiles, fan-out and `+wt` remain deferred and are refused before launch.
+
+Use `/dispatch claude@folio/src/api: your task` to request a project subfolder. **↑/↓** move through visible suggestions and wrap; **Enter** accepts a suggestion only after an arrow moved the highlight. Otherwise Enter submits. **Tab** accepts and **Shift+Tab** cycles suggestions. Without suggestions, arrows recall commands from this run; **Esc** restores the displaced draft.
 
 Press **n** for the composer: provider, project or **Other folder…**, subfolder, optional name and multiline prompt. Use **Tab** to move between fields. Review the proposed location before dispatch. Herdr starts a worktree at its repository root; when a requested subfolder cannot apply, Shep shows that notice before launch.
 
@@ -113,6 +116,10 @@ Use `/dispatch codex@shep+here: your task` to keep a task in the main checkout e
 Press **g** to switch between Tasks grouped by project and Agents grouped by provider. Tasks and drafts last only for this run. After restarting, still-running agents appear in the Agents view.
 
 Use **↑/↓** to select an agent and **Enter** to focus its actual Herdr pane. Mouse clicks select agents; the Focus and Close buttons act on that selection. **x** opens a close confirmation. Closing an agent ends that pane’s process; it is separate from quitting Shep, which leaves all agents running.
+
+Press **p** on a task or agent to write a follow-up. The editor shows its identity and status; paste or type multiple lines, use **Ctrl+S** to send once, or **Esc** to keep that agent's draft. Agents waiting for input must be answered in their own panes. An uncertain follow-up is never resent automatically; inspect the pane before sending again. Follow-ups do not wait for activity, and a submitted result is not proof the agent executed the text.
+
+Press **c** to clear the selected closed or failed task, or **C** to clear all closed tasks. An open agent must be closed separately with **x** first. Clearing only hides task rows and releases their local reservations; it does not remove worktrees or Git branches.
 
 While Shep is running, open [localhost:4317](http://localhost:4317) for the read-only browser dashboard. Quitting Shep also stops that browser server.
 
@@ -156,16 +163,20 @@ Shep only persists a configuration change when you explicitly confirm trust for 
 | --- | --- |
 | `↑` / `↓` or `k` / `j` | Select an agent |
 | `Enter` | Focus the selected agent’s actual Herdr pane |
-| `/` | Enter `/dispatch [provider][@project]: your task`; press Enter to launch |
+| `/` | Enter `/dispatch [provider][@project][:] your task`; press Enter to launch |
 | `g` | Switch Tasks / Agents |
 | `d` / `→` | Open selected task or agent details; use Up/Down to scroll |
 | `i` | Read the full notice, including long diagnostic paths |
 | `n` | Open optional launch settings and multiline composer |
-| `Tab` / `Shift+Tab` | Move between composer fields |
+| `Tab` / `Shift+Tab` | Move between composer fields; accept / cycle command suggestions |
+| `↑` / `↓` in command input | Choose visible suggestions; otherwise recall commands |
+| `Enter` in command input | Accept after an arrow selection; otherwise dispatch |
 | `←` / `→` | Change the selected composer option |
-| `Ctrl+S` | Submit the composer |
+| `Ctrl+S` | Submit the composer or send the follow-up once |
 | `s` | Search agents and workspaces |
 | `f` | Cycle status filters |
+| `p` | Open a follow-up editor for the selected task or agent |
+| `c` / `C` | Clear the selected closed/failed task / all closed tasks |
 | `x` | Confirm closing the selected agent |
 | `Esc` | Cancel or leave the current editor/dialog |
 | `r` | Refresh the overview |

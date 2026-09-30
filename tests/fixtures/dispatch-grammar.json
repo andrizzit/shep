@@ -475,7 +475,7 @@
       "expected": {
         "agents": [
           {
-            "provider": "codex",
+            "provider": "claude",
             "profile": null
           }
         ],
@@ -483,8 +483,8 @@
         "subfolder": "",
         "modeIntent": "auto",
         "template": null,
-        "task": "claude review this code",
-        "inputTask": "claude review this code",
+        "task": "review this code",
+        "inputTask": "review this code",
         "command": "/dispatch claude review this code",
         "mode": "auto"
       }
@@ -651,6 +651,186 @@
           "path": "/fixture/locked/src",
           "message": "Herdr needs you to confirm you trust /fixture/locked before creating worktrees."
         }
+      }
+    },
+    {
+      "id": "optional-colon-agent-project",
+      "input": "/dispatch claude@folio is folio good",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/folio/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "is folio good",
+        "inputTask": "is folio good",
+        "command": "/dispatch claude@folio is folio good",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "optional-colon-here",
+      "input": "/dispatch codex@shep+here explain dispatch",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "here",
+        "template": null,
+        "task": "explain dispatch",
+        "inputTask": "explain dispatch",
+        "command": "/dispatch codex@shep+here explain dispatch",
+        "mode": "here"
+      }
+    },
+    {
+      "id": "optional-colon-project",
+      "input": "/dispatch @folio fix the title",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/folio/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "fix the title",
+        "inputTask": "fix the title",
+        "command": "/dispatch @folio fix the title",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "optional-colon-agent",
+      "input": "/dispatch claude review this",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "review this",
+        "inputTask": "review this",
+        "command": "/dispatch claude review this",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "optional-colon-default",
+      "input": "/dispatch fix the bug",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "fix the bug",
+        "inputTask": "fix the bug",
+        "command": "/dispatch fix the bug",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "optional-colon-capitalized-literal",
+      "input": "/dispatch Claude said X",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "Claude said X",
+        "inputTask": "Claude said X",
+        "command": "/dispatch Claude said X",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "optional-colon-uninstalled-literal",
+      "input": "/dispatch cursor position is off",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "cursor position is off",
+        "inputTask": "cursor position is off",
+        "command": "/dispatch cursor position is off",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "optional-colon-file-literal",
+      "input": "/dispatch @src/app.ts fix",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "@src/app.ts fix",
+        "inputTask": "@src/app.ts fix",
+        "command": "/dispatch @src/app.ts fix",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "explicit-provider-task-literal",
+      "input": "/dispatch codex: grok this file",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "grok this file",
+        "inputTask": "grok this file",
+        "command": "/dispatch codex: grok this file",
+        "mode": "auto"
       }
     }
   ]
