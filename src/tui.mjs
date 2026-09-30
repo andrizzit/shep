@@ -209,6 +209,20 @@ function editorLines(text, cursor, width, height) {
   const start = Math.max(0, cursorLine - height + 1);
   return result.slice(start, start + height);
 }
+function FollowUpEditor({ state, model, width, height, registry }) {
+  const { target, text, cursor } = state.followUp;
+  const rows = Math.max(1, height - 7);
+  const content = editorLines(text, cursor, Math.max(1, width - 4), rows);
+  return h(Box, { width, height, borderStyle: 'round', borderColor: C.orange, paddingX: 1, flexDirection: 'column', overflow: 'hidden' },
+    line('FOLLOW-UP', { color: C.orange, bold: true }),
+    line(target.name || providerName(target.provider), { color: C.muted }),
+    line(STATUS_LABELS[knownStatus(target)], { color: C[knownStatus(target)] }),
+    line(`Pane ${target.paneId}`, { color: C.muted }),
+    h(Box, { flexGrow: 1, flexDirection: 'column', minHeight: 1, overflow: 'hidden' }, ...content.map((text, index) => line(text, { key: index, color: C.ink }))),
+    h(Box, { gap: 1, flexShrink: 0 },
+      h(Button, { label: 'Send Ctrl+S', registry, id: 'follow-up-send', disabled: Boolean(controlBlock(state)), action: () => model.action('follow-up-send') }),
+      h(Button, { label: 'Back Esc', registry, id: 'follow-up-back', action: () => model.action('cancel') })));
+}
 function Composer({ state, model, width, height, registry }) {
   const provider = state.profiles.providers.find(item => item.id === state.draft.provider);
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
@@ -374,7 +388,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const status = health(state);
   const agents = state.snapshot.agents || [];
   const headerHeight = short ? 1 : compact ? 2 : 4;
-  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view) ? 0 : 3;
+  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up'].includes(state.view) ? 0 : 3;
   const footerHeight = short ? 1 : 2;
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : state.dispatchHold ? 3 : 2;
   const suggestionHeight = state.view === 'command' && state.suggestions.length ? 2 : 0;
@@ -382,14 +396,19 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
   const listWidth = split ? Math.floor(width * .52) : width;
   const rightWidth = width - listWidth;
-  const activePanel = state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
+  const activePanel = state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
   const List = state.boardView === 'tasks' ? TaskList : AgentList;
-  const notice = state.notice?.message || (state.snapshot.source.state !== 'connected' ? `${state.snapshot.updatedAt ? 'Stale snapshot. ' : ''}${state.snapshot.source.message || 'Waiting for Herdr…'}` : state.snapshot.mode === 'demo' ? 'Sample agents only. Launch, focus and close are disabled.' : state.view === 'command' ? 'Use agent: to choose a provider; without a prefix, Codex runs the task. Enter submits.' : state.view === 'confirm' ? 'Review the captured identity. Cancel is selected by default.' : state.view === 'compose' ? 'Optional launch settings. Escape keeps your draft.' : 'Ready. Type /dispatch your task, or select an agent to focus its native pane.');
+  const notice = state.notice?.message || (state.snapshot.source.state !== 'connected' ? `${state.snapshot.updatedAt ? 'Stale snapshot. ' : ''}${state.snapshot.source.message || 'Waiting for Herdr…'}` : state.snapshot.mode === 'demo' ? 'Sample agents only. Launch, focus and close are disabled.' : state.view === 'command' ? 'Colon optional for clear prefixes. Enter submits unless arrows selected a suggestion.' : state.view === 'confirm' ? 'Review the captured identity. Cancel is selected by default.' : state.view === 'compose' ? 'Optional launch settings. Escape keeps your draft.' : 'Ready. Type /dispatch your task, or select an agent to focus its native pane.');
   let footer = ['command', 'compose'].includes(state.view) && state.dispatchHold ? 'Ctrl+F focus pane · Ctrl+Y allow new · Esc back' : state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n setup  s search  f filter  q quit';
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
+  if (state.view === 'follow-up') footer = 'Ctrl+S send · Esc keeps draft';
+  const boardActions = ['board', 'detail'].includes(state.view);
+  const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
+  const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
+  const closedTasks = state.tasks.some(task => !task.dismissed && task.live.status === 'closed');
   const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n Setup → Project'}`;
-  const commandValue = state.command || '/dispatch [agent][@project][+here]: task · default Codex';
+  const commandValue = state.command || '/dispatch [agent][@project][+here][:] task';
   const commandDisplay = state.view === 'command' ? editorLines(state.command, state.cursor.command, Math.max(4, width - (width < 70 ? 4 : 10)), 1)[0] : commandValue;
   return h(Box, { width, height, flexDirection: 'column', backgroundColor: C.canvas, overflow: 'hidden' },
     h(Box, { height: headerHeight, flexShrink: 0, alignItems: compact ? 'flex-start' : 'center', gap: 1 },
@@ -416,7 +435,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
       split ? h(React.Fragment, null,
         h(List, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
-        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
+        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
     suggestionHeight > 0 && h(Suggestions, { state, model, width, registry }),
     state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
       h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4))),
@@ -426,6 +445,9 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
     h(Box, { height: footerHeight, flexDirection: 'column', flexShrink: 0 },
       h(Box, { height: 1, flexShrink: 0 },
         h(Button, { label: short ? 'Quit' : 'Quit Ctrl+C', registry, id: 'quit', action: () => model.action('quit') }),
+        boardActions && h(Button, { label: 'p Send', registry, id: 'follow-up', disabled: !model.selected() || Boolean(controlBlock(state)), action: () => model.action('follow-up') }),
+        boardActions && clearable && h(Button, { label: 'c Clear', registry, id: 'clear', action: () => model.action('clear') }),
+        boardActions && closedTasks && h(Button, { label: 'C Closed', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),
         h(Box, { flexGrow: 1, minWidth: 0 }, line(footer, { color: C.muted }))),
       !short && h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint }))));
 }

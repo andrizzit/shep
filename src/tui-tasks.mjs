@@ -298,7 +298,40 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     } catch { apply({ state: 'unavailable', message: 'Change summary unavailable.', at: new Date(now()).toISOString() }); }
     finally { summaryPending.delete(task.id); }
   }
-  return { refresh, initializeProject, context, parse, submit, decide, otherFolder, projectFor, observe,
+  async function dismiss(rowId, allClosed = false) {
+    const candidates = read().tasks.filter(task => !task.dismissed && (allClosed ? task.live.status === 'closed' : `task:${task.id}` === rowId));
+    const openMessage = 'This agent is still open. Close it with x first, or keep it.';
+    if (!candidates.length) { inform(allClosed ? 'No closed tasks to clear.' : openMessage, 'warning'); return; }
+    if (candidates.some(task => task.live.status !== 'closed' && task.launch.state !== 'failed')) { inform(openMessage, 'warning'); return; }
+    change({ busy: 'dismiss' });
+    let cleared = 0;
+    try {
+      for (const task of candidates) {
+        const panes = task.target ? [task.target] : task.created?.panes || [];
+        if (task.live.status !== 'closed' && panes.length) {
+          if (read().snapshot.mode !== 'live' || read().snapshot.source.state !== 'connected') throw new Error('Reconnect to Herdr to verify that this task’s pane is closed.');
+          const snapshot = await controller.getControlSnapshot();
+          if (!Array.isArray(snapshot?.panes)) throw new Error('Pane closure could not be verified. Refresh before clearing this task.');
+          if (snapshot.panes.some(pane => panes.some(target => pane.pane_id === target.paneId || pane.terminal_id === target.terminalId))) { inform(openMessage, 'warning'); return; }
+        }
+        if (!alive) return;
+        const current = read().tasks.find(item => item.id === task.id);
+        if (!current || current.dismissed || targetSignature(current) !== targetSignature(task)) continue;
+        const result = await controller.dismissTask({ taskId: task.id, attemptId: task.attemptId });
+        if (!alive) return;
+        if (!result.ok) { inform(result.message, 'warning'); return; }
+        updateTask(task.id, item => transition(item, { type: 'dismiss', at: new Date(now()).toISOString() }));
+        cleared += 1;
+      }
+      if (cleared) { change({ view: 'board' }); inform(allClosed ? `Cleared ${cleared} closed task${cleared === 1 ? '' : 's'}.` : 'Task cleared.'); }
+    } catch (error) { inform(error.message || 'The task could not be cleared.', 'warning'); }
+    finally { change({ busy: null }); }
+  }
+  function recordFollowUp(target, outcome) {
+    const task = read().tasks.find(item => !item.dismissed && item.live.status !== 'closed' && matchesTask(item, target));
+    if (task) updateTask(task.id, item => transition(item, { type: 'follow-up', outcome, at: new Date(now()).toISOString() }));
+  }
+  return { refresh, initializeProject, context, parse, submit, decide, otherFolder, projectFor, observe, dismiss, recordFollowUp,
     inspect: rowId => { const task = read().tasks.find(item => `task:${item.id}` === rowId); if (task) void refreshSummary(task); },
     getTasks: () => structuredClone(read().tasks),
     destroy: () => { alive = false; discovery += 1; abort.abort(); cancelNotices(); consent.clear(); } };

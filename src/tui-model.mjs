@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from 'node:util';
 import { safeText } from './terminal.mjs';
 import { createTaskSession, taskRows, commandSuggestions, TASK_LABELS } from './tui-tasks.mjs';
+import { validatePrompt } from './dispatch/contracts.mjs';
 
 export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs input', done: 'Done', idle: 'Idle', unknown: 'Unknown' });
 export const FIELDS = ['provider', 'projectKey', 'subfolder', 'name', 'prompt', 'dispatch'];
@@ -107,6 +108,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     profiles: { providers: [], workspaces: [], defaultCwd: '', defaultWorkspaceId: '' },
     profilesLoading: true, profilesError: null, busy: null, notice: null,
     confirmation: null, confirmClose: false, dispatchHold: false, resultTarget: null,
+    followUp: { target: null, text: '', cursor: 0, drafts: {}, returnView: 'board' },
     tasks: [], projects: [], trustRequired: [], projectsLoading: true, projectsError: null, projectWarnings: [],
     decision: null, requiredNotice: null, detailOffset: 0, projectQuery: '', pickerIndex: 0, folderPath: '', folderLoading: false,
     suggestions: [], suggestionIndex: 0, suggestionArrowMoved: false, recall: [], recallIndex: null, recallDraft: '',
@@ -168,6 +170,41 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     if (state.profilesLoading || state.profilesError) { inform('Launch settings are unavailable. Use Ctrl+R to refresh them.', 'warning'); return; }
     await session.submit(source);
   }
+  const followUpKey = target => JSON.stringify([target.paneId, target.terminalId, target.provider, target.agentName ?? null, target.sessionId ?? null]);
+  function followUpBlock(target) {
+    const blocked = targetBlock(target);
+    if (blocked) return blocked;
+    if (!target.paneId || !target.terminalId) return 'Select an agent with a confirmed pane and terminal identity.';
+    const current = state.snapshot.agents.find(agent => agent.id === target.id);
+    if (target.agentName != null && current.agentName !== target.agentName || target.sessionId != null && current.sessionId !== target.sessionId) return 'This agent is no longer available. Select it again from the live list.';
+    return null;
+  }
+  function openFollowUp() {
+    const target = selected(), blocked = followUpBlock(target);
+    if (blocked) { inform(blocked, 'warning'); return; }
+    const text = state.followUp.drafts[followUpKey(target)] || '';
+    change({ view: 'follow-up', followUp: { ...state.followUp, target: structuredClone(target), text, cursor: graphemes(text).length, returnView: state.view === 'detail' ? 'detail' : 'board' } });
+  }
+  async function sendFollowUp() {
+    const { target, text, returnView } = state.followUp;
+    const blocked = followUpBlock(target);
+    if (blocked) { inform(blocked, 'warning'); return; }
+    if (validatePrompt(text).length) { inform('Enter a nonempty prompt no larger than 64 KiB. Newlines and tabs are allowed; terminal control characters are not.', 'warning'); return; }
+    change({ busy: 'follow-up' });
+    const uncertain = 'Follow-up delivery could not be confirmed. Inspect the agent before sending it again.';
+    try {
+      const outcome = await controller.followUp({ target: structuredClone(target), text });
+      if (!alive) return;
+      session.recordFollowUp(target, outcome);
+      const submitted = outcome.state === 'submitted';
+      const message = submitted ? 'Follow-up submitted' : outcome.state === 'needs_input' ? 'The agent is waiting for input in its pane. Answer it there.' : outcome.state === 'uncertain' ? uncertain : outcome.message;
+      change({ busy: null, ...(submitted || outcome.state === 'uncertain' ? { view: returnView } : {}),
+        ...(submitted ? { followUp: { ...state.followUp, text: '', cursor: 0, drafts: { ...state.followUp.drafts, [followUpKey(target)]: '' } } } : {}) });
+      inform(message, submitted ? 'success' : 'warning');
+    } catch {
+      change({ busy: null, view: returnView }); inform(uncertain, 'warning');
+    }
+  }
   const submitCommand = () => { void dispatch('command'); };
   function updateSuggestions() {
     const cursor = graphemes(state.command).slice(0, state.cursor.command).join('').length;
@@ -204,6 +241,13 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     change({ view: 'compose', field: 'subfolder', draft: { ...state.draft, projectKey: project.key || project.root, subfolder: '' } });
   }
   function edit(input, key = {}, paste = false) {
+    if (state.view === 'follow-up') {
+      const edited = editText(state.followUp.text, state.followUp.cursor, input, paste ? {} : key, true);
+      if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) { inform('This draft exceeds 256 KiB. Paste a smaller prompt.', 'warning'); return; }
+      change({ followUp: { ...state.followUp, text: edited.value, cursor: edited.cursor,
+        drafts: { ...state.followUp.drafts, [followUpKey(state.followUp.target)]: edited.value } } });
+      return;
+    }
     const field = state.view === 'search' ? 'search' : state.view === 'command' ? 'command' : state.view === 'picker' ? 'projectQuery' : state.view === 'folder' ? 'folderPath' : state.field;
     if (!['name', 'subfolder', 'prompt', 'search', 'command', 'projectQuery', 'folderPath'].includes(field)) return;
     const top = ['command', 'projectQuery', 'folderPath'].includes(field);
@@ -233,6 +277,15 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   function action(name, value) {
     if (name === 'quit') { onQuit(); return; }
     if (state.busy || state.requiredNotice) return;
+    if (state.view === 'follow-up') {
+      if (name === 'follow-up-send') void sendFollowUp();
+      else if (name === 'cancel') change({ view: state.followUp.returnView });
+      return;
+    }
+    if (['board', 'detail'].includes(state.view)) {
+      if (name === 'follow-up') { openFollowUp(); return; }
+      if (name === 'clear' || name === 'clear-closed') { void session.dismiss(state.boardView === 'tasks' ? state.selectedTaskId : null, name === 'clear-closed'); return; }
+    }
     if (state.view === 'decision') {
       if (name === 'decide') { if (value && controlBlock(state)) inform(controlBlock(state), 'warning'); else void session.decide(Boolean(value)); }
       else if (name === 'cancel') void session.decide(false);
@@ -300,6 +353,12 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     if (key.ctrl && (input === 'c' || input === 'd')) { action('quit'); return; }
     if (state.busy) return;
     if (key.ctrl && input === 'r') { action('refresh'); return; }
+    if (state.view === 'follow-up') {
+      if (key.escape) action('cancel');
+      else if (key.ctrl && input === 's') action('follow-up-send');
+      else edit(input, key);
+      return;
+    }
     if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'y' && state.dispatchHold) { action('allow-launch'); return; }
     if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'f' && state.resultTarget) { action('focus-result'); return; }
     if (state.view === 'decision') {
@@ -372,6 +431,9 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       else if (key.upArrow || input === 'k' || key.pageUp) action('detail-scroll', -1);
       else if (key.return && state.view === 'detail') action('focus');
       else if (input === 'x' && state.view === 'detail') action('close');
+      else if (input === 'p' && state.view === 'detail') action('follow-up');
+      else if (input === 'c' && state.view === 'detail') action('clear');
+      else if (input === 'C' && state.view === 'detail') action('clear-closed');
       else if (input === 'q') action('quit');
       return;
     }
@@ -381,10 +443,13 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     else if (key.rightArrow || input === 'd') action('details');
     else if (input === 'n') action('new');
     else if (input.startsWith('/') && !key.ctrl && !key.meta) { change({ view: 'command', command: input, cursor: { ...state.cursor, command: graphemes(input).length } }); updateSuggestions(); }
-    else if (input === 's') action('search');
+    else if (input === 's' && !key.ctrl) action('search');
     else if (input === 'f') action('filter');
     else if (input === 'r') action('refresh');
     else if (input === 'x') action('close');
+    else if (input === 'p') action('follow-up');
+    else if (input === 'c') action('clear');
+    else if (input === 'C') action('clear-closed');
     else if (key.return) action('focus');
     else if (key.downArrow || input === 'j' || key.tab && !key.shift) moveSelection(1);
     else if (key.upArrow || input === 'k' || key.tab && key.shift) moveSelection(-1);
@@ -400,7 +465,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     action, key, paste: text => {
       if (state.busy) return;
       if (state.view === 'board' && text.startsWith('/')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
-      else if (['compose', 'search', 'command', 'picker', 'folder'].includes(state.view)) edit(text, {}, true);
+      else if (['compose', 'search', 'command', 'picker', 'folder', 'follow-up'].includes(state.view)) edit(text, {}, true);
     }, ready,
     selected, targetBlock, pickerItems, getTasks: session.getTasks, showNotice: inform, destroy: () => { session.destroy(); alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
 }
