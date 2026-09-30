@@ -6,6 +6,8 @@ import { createTuiModel } from '../src/tui-model.mjs';
 import { TuiView } from '../src/tui.mjs';
 import { deferredCommand } from '../src/tui-tasks.mjs';
 import { createFakeRegistry, makeProject } from './helpers/dispatch-fakes.mjs';
+import { parseCommand } from '../src/dispatch/grammar.mjs';
+import { DEFAULT_CONFIG } from '../src/dispatch/contracts.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const projects = [makeProject(), makeProject({ key: 'git:/fixture/folio/.git', root: '/fixture/folio', commonDir: '/fixture/folio/.git', name: 'folio', aliases: ['fo'] })];
@@ -84,4 +86,60 @@ test('checkpoint3: deferred no-colon forms use the same refusals and never dispa
   for (const text of ['foo.bar task', 'apple,pear task', '@src/app.ts fix', '@unknown+wt task', 'Claude.fast task', 'codex: use +wt and claude.fast literally']) {
     assert.equal(deferredCommand(`/dispatch ${text}`, { projects, providers }), null, text);
   }
+});
+
+const grammarContext = { providers, projects, trustRequired: [], contextProjectKey: projects[0].key, contextSubfolder: 'src', config: DEFAULT_CONFIG };
+const examples = [
+  ['/dispatch claude@folio is folio good', 'claude', 'folio', 'is folio good', 'auto', ''],
+  ['/dispatch codex@shep+here explain dispatch', 'codex', 'shep', 'explain dispatch', 'here', ''],
+  ['/dispatch @folio fix the title', 'codex', 'folio', 'fix the title', 'auto', ''],
+  ['/dispatch claude review this', 'claude', 'shep', 'review this', 'auto', 'src'],
+  ['/dispatch fix the bug', 'codex', 'shep', 'fix the bug', 'auto', 'src'],
+  ['/dispatch Claude said X', 'codex', 'shep', 'Claude said X', 'auto', 'src'],
+  ['/dispatch cursor position is off', 'codex', 'shep', 'cursor position is off', 'auto', 'src'],
+  ['/dispatch @src/app.ts fix', 'codex', 'shep', '@src/app.ts fix', 'auto', 'src'],
+  ['/dispatch codex: grok this file', 'codex', 'shep', 'grok this file', 'auto', 'src'],
+  ['/dispatch claude@fo+here task', 'claude', 'folio', 'task', 'here', ''],
+  ['/dispatch @FO+here task', 'codex', 'folio', 'task', 'here', ''],
+];
+for (const [command, provider, project, task, modeIntent, subfolder] of examples) test(`checkpoint3 optional prefix: ${command}`, () => {
+  const result = parseCommand(command, grammarContext);
+  assert.equal(result.agents[0].provider, provider);
+  assert.equal(result.project.name, project);
+  assert.equal(result.task, task); assert.equal(result.inputTask, task);
+  assert.equal(result.command, command); assert.equal(result.modeIntent, modeIntent); assert.equal(result.subfolder, subfolder);
+});
+
+test('checkpoint3: no-colon near misses stay literal and colon errors stay strict', () => {
+  for (const literal of ['Claude@folio task', 'claude@unknown task', 'cursor@folio task', '@unknown task', 'codex@shep+h task', '+here task', '@src/app.ts fix', 'codex! task']) {
+    const parsed = parseCommand(`/dispatch ${literal}`, grammarContext);
+    assert.equal(parsed.agents[0].provider, 'codex', literal); assert.equal(parsed.task, literal);
+  }
+  assert.equal(parseCommand('/dispatch notinstalled: task', grammarContext).code, 'unknown_agent');
+  assert.equal(parseCommand('/dispatch claude@unknown: task', grammarContext).code, 'unknown_project');
+  assert.equal(parseCommand('/dispatch claude', grammarContext).code, 'invalid_prompt');
+  const unavailable = parseCommand('/dispatch cursor: task', grammarContext);
+  assert.equal(unavailable.agents[0].provider, 'cursor', 'availability remains enforced by the existing TUI before sending');
+});
+
+test('checkpoint3: optional-prefix task bytes and embedded colons remain literal', () => {
+  const text = ' \t--flag $(not executed); "quoted"\nUnicode café 🙂: keep all bytes';
+  for (const separator of [' ', '\t']) {
+    const command = `/dispatch claude@folio${separator}${text}`;
+    const parsed = parseCommand(command, grammarContext);
+    assert.equal(parsed.task, text); assert.equal(parsed.inputTask, text); assert.equal(parsed.command, command);
+  }
+  assert.equal(parseCommand('/dispatch claude task: detail', grammarContext).task, 'task: detail');
+});
+
+test('checkpoint3: installed providers and known projects reach the TUI parser and send only once', async t => {
+  const { model, calls } = await setup(t);
+  const text = ' \t--flag $(not executed); "quoted"\nUnicode café 🙂: keep all bytes';
+  model.paste(`/dispatch claude@folio ${text}`); model.key('', { return: true }); model.key('', { return: true }); await tick();
+  assert.equal(calls.length, 1); assert.equal(calls[0].provider, 'claude'); assert.equal(calls[0].placement.projectKey, projects[1].key);
+  assert.equal(calls[0].prompt, text); assert.equal(calls[0].inputTask, text);
+  model.paste('/dispatch cursor position is off'); model.key('', { return: true }); await tick();
+  assert.equal(calls[1].provider, 'codex'); assert.equal(calls[1].prompt, 'cursor position is off');
+  model.paste('/dispatch cursor: explicit unavailable'); model.key('', { return: true }); await tick();
+  assert.equal(calls.length, 2); assert.match(model.getSnapshot().notice.message, /unavailable/);
 });

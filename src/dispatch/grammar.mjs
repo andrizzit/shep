@@ -47,6 +47,14 @@ function resolveProject(value, ctx) {
   return error(text(suggestions.length ? MESSAGES.unknownProjectSuggestion : MESSAGES.unknownProject, { project: value, suggestions: suggestions.join(', ') }), 'unknown_project');
 }
 
+function clearPrefix(token, ctx) {
+  const prefix = /^([a-z][a-z0-9]*)?(?:@([A-Za-z0-9._-]{1,64}))?(?:\+(here))?$/.exec(token);
+  if (!prefix || (!prefix[1] && !prefix[2])) return false;
+  if (prefix[1] && !(ctx.providers ?? []).some(provider => provider.id === prefix[1] && provider.available)) return false;
+  if (prefix[2] && !entriesFor(ctx).some(project => matches(project, prefix[2]))) return false;
+  return true;
+}
+
 export function parseCommand(line, ctx = {}) {
   if (typeof line !== 'string') return error(MESSAGES.unknownCommand, 'unknown_command');
   const command = /^\/([a-z][a-z0-9-]*)(?:[ \t]+([\s\S]*))?$/.exec(line);
@@ -55,7 +63,11 @@ export function parseCommand(line, ctx = {}) {
   const template = command[1] === 'dispatch' ? null : command[1];
   let inputTask = command[2] ?? '';
   let agents = [{ provider: DEFAULT_PROVIDER, profile: null }], projectName = null, modeIntent = 'auto';
-  const prefix = /^([^\s:]+):[ \t]?([\s\S]*)$/.exec(inputTask);
+  let prefix = /^([^\s:]+):[ \t]?([\s\S]*)$/.exec(inputTask);
+  if (!prefix && template === null) {
+    const optional = /^([^\s:]+)(?:[ \t]([\s\S]*)|$)/.exec(inputTask);
+    if (optional && clearPrefix(optional[1], ctx)) prefix = [optional[0], optional[1], optional[2] ?? ''];
+  }
   if (prefix) {
     inputTask = prefix[2];
     const spec = /^([^@+]*)(?:@([^+]*))?(?:\+(.*))?$/.exec(prefix[1]);
