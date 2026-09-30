@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.3, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.4, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, automatic placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -86,6 +86,8 @@ The brackets indicate an optional part; do not type the brackets.
 | `/dispatch your task` | **Codex**, unless the first word is a clear prefix |
 
 The colon is optional for a clear prefix: a lowercase installed provider, a known `@project`, or their combination, optionally with `+here`. `/dispatch claude review this code` now sends `review this code` to Claude. Capitalized words (`Claude`), unavailable providers, unknown projects and file mentions (`@src/app.ts`) remain part of the literal Codex task. With a colon, unknown or unavailable providers and unknown projects keep their strict errors. Profiles, fan-out and `+wt` are refused with or without a colon; they never become a literal task accidentally.
+
+A first word such as `codex.md`, `claude.md` or `pi.js` is literal task text. Without a colon, a dotted agent word counts as deferred profile syntax only when its suffix is a configured profile or the prefix includes `@`, a comma or `+wt`. For example, `/dispatch codex.md is outdated, update it` sends the whole task to Codex. The colon form is unchanged.
 
 To send a task that starts with an installed provider's name to Codex, be explicit: `/dispatch codex: claude said X`.
 
@@ -231,7 +233,7 @@ For a worktree created by the task, its detail view shows the full worktree path
 
 If the target or its status changed while the dialog was open, Shep can refuse the close. Cancel, inspect the current agent, and start a new confirmation. A Done or Idle status is a cue to review; Shep does not automatically close agents.
 
-After its pane is gone, press **c** on the task to clear its row, or **C** to clear all closed tasks. A failed task can also be cleared if no pane remains. An open agent is refused: “This agent is still open. Close it with x first, or keep it.” Clearing only hides rows and releases local reservations. It never closes a pane, removes a worktree or deletes a branch.
+After its pane is gone, press **c** on the task to clear its row, or **C** to clear all closed tasks. A failed task can also be cleared if no pane remains. An open detected agent is refused: “This agent is still open. Close it with x first, or keep it.” If a failed task has a pane but no detected agent, x cannot close it. Close the pane identified in the notice directly in Herdr, then press c again. Clearing only hides rows and releases local reservations. It never closes a pane, removes a worktree or deletes a branch.
 
 ## 10. Stop and reopen Shep
 
@@ -347,7 +349,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.3.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.4.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 

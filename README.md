@@ -7,7 +7,7 @@
 
 Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
 
-This branch provides **0.4.0-checkpoint.3**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
+This branch provides **0.4.0-checkpoint.4**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
@@ -64,7 +64,7 @@ The public default branch may still be 0.3.0 while this preview is unpushed. To 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.3.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.4.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -103,7 +103,7 @@ Type a command in Shep and press **Enter**:
 /dispatch review the current changes
 ```
 
-A clear prefix can omit the colon: `/dispatch claude@folio add unit tests`, `/dispatch @folio fix the title`, or `/dispatch claude review this`. A prefix without a colon requires a lowercase installed provider and/or a known project. Capitalized words, unavailable providers, unknown projects and file mentions such as `@src/app.ts` stay literal task text for **Codex**. Use `/dispatch codex: claude said X` when the task starts with a provider name. Colon forms keep their strict errors for unknown or unavailable providers and ambiguous projects. `+here` works with either form; profiles, fan-out and `+wt` remain deferred and are refused before launch.
+A clear prefix can omit the colon: `/dispatch claude@folio add unit tests`, `/dispatch @folio fix the title`, or `/dispatch claude review this`. A prefix without a colon requires a lowercase installed provider and/or a known project. Capitalized words, unavailable providers, unknown projects and file mentions such as `@src/app.ts` stay literal task text for **Codex**. A leading filename such as `codex.md`, `claude.md` or `pi.js` also stays literal unless its suffix names a configured profile or it uses explicit deferred syntax (`@`, a comma or `+wt`). Use `/dispatch codex: claude said X` when the task starts with a provider name. Colon forms keep their strict errors for unknown or unavailable providers and ambiguous projects. `+here` works with either form; profiles, fan-out and `+wt` remain deferred and are refused before launch.
 
 Use `/dispatch claude@folio/src/api: your task` to request a project subfolder. **↑/↓** move through visible suggestions and wrap; **Enter** accepts a suggestion only after an arrow moved the highlight. Otherwise Enter submits. **Tab** accepts and **Shift+Tab** cycles suggestions. Without suggestions, arrows recall commands from this run; **Esc** restores the displaced draft.
 
@@ -119,7 +119,7 @@ Use **↑/↓** to select an agent and **Enter** to focus its actual Herdr pane.
 
 Press **p** on a task or agent to write a follow-up. The editor shows its identity and status; paste or type multiple lines, use **Ctrl+S** to send once, or **Esc** to keep that agent's draft. Agents waiting for input must be answered in their own panes. An uncertain follow-up is never resent automatically; inspect the pane before sending again. Follow-ups do not wait for activity, and a submitted result is not proof the agent executed the text.
 
-Press **c** to clear the selected closed or failed task, or **C** to clear all closed tasks. An open agent must be closed separately with **x** first. Clearing only hides task rows and releases their local reservations; it does not remove worktrees or Git branches.
+Press **c** to clear the selected closed or failed task, or **C** to clear all closed tasks. An open detected agent must be closed separately with **x** first. If a failed task retains a pane without a detected agent, close the identified pane in Herdr, then clear the task. Clearing only hides task rows and releases their local reservations; it does not remove worktrees or Git branches.
 
 While Shep is running, open [localhost:4317](http://localhost:4317) for the read-only browser dashboard. Quitting Shep also stops that browser server.
 
