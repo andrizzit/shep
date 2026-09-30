@@ -97,6 +97,70 @@ async function fixture(t, { beforeRun, afterRun, gitOverride, projectPatch, snap
 const mutations = f => f.calls.filter(c => ['create', 'split', 'start', 'prompt', 'remove', 'close'].includes(c.argv[1]));
 const creations = f => f.calls.filter(c => ['create', 'split'].includes(c.argv[1]));
 
+for (const kind of ['tab', 'workspace']) for (const code of ['agent_prompt_stalled', 'timeout', 'agent_blocked']) {
+  test(`${kind}: ${code} preserves the first prompt receipt and never resubmits`, async t => {
+    const f = await fixture(t, { beforeRun: argv => { if (argv[1] === 'prompt') throw error(code); } });
+    if (kind === 'workspace') f.snapshot.panes[0].foreground_cwd = f.temp;
+    const request = f.request({ prompt: '--wait\nKeep this literal prompt exactly once.\t羊' });
+    const result = await f.controller.dispatch(request);
+    assert.equal(result.state, code === 'agent_blocked' ? 'needs_input' : 'uncertain');
+    assert.equal(result.code, code); assert.equal(result.stage, 'prompt');
+    if (code === 'agent_prompt_stalled') assert.equal(result.message, 'Prompt not picked up. Check the pane.');
+    if (code === 'agent_blocked') assert.match(result.message, /prompt was not sent/);
+    assert.equal(result.placement.targetKind, kind);
+    assert.equal(result.created.panes[0].paneId, result.paneId);
+    assert.equal(result.created.panes[0].terminalId, result.terminalId);
+    assert.ok(f.snapshot.panes.some(pane => pane.pane_id === result.paneId && pane.terminal_id === result.terminalId));
+    assert.deepEqual(validateOutcome(result), []);
+    const promptCalls = f.calls.filter(call => call.argv[1] === 'prompt');
+    assert.equal(promptCalls.length, 1); assert.equal(promptCalls[0].argv[3], request.prompt);
+    assert.deepEqual(await f.controller.dispatch(request), result, 'The same completed attempt is returned without another send');
+    assert.equal(f.calls.filter(call => call.argv[1] === 'prompt').length, 1);
+    assert.equal(creations(f).length, 1);
+    assert.ok(!f.calls.some(call => ['close', 'remove', 'send-keys', 'send-text'].includes(call.argv[1])));
+    assert.doesNotMatch(result.message, /PRIVATE/);
+  });
+}
+
+test('dispose during the first prompt wait preserves its receipt and sends nothing else', async t => {
+  const entered = deferred(), release = deferred();
+  let signal;
+  const f = await fixture(t, { afterRun: async (argv, _f, response, options) => {
+    if (argv[1] === 'prompt') { signal = options.signal; entered.resolve(); await release.promise; }
+    return response;
+  } });
+  const request = f.request(), pending = f.controller.dispatch(request);
+  await entered.promise;
+  f.controller.dispose(); assert.equal(signal.aborted, true);
+  release.resolve();
+  const result = await pending;
+  assert.equal(result.state, 'uncertain'); assert.equal(result.code, 'disposed');
+  assert.equal(result.created.panes[0].paneId, result.paneId);
+  assert.ok(f.snapshot.panes.some(pane => pane.pane_id === result.paneId));
+  assert.equal(f.calls.filter(call => call.argv[1] === 'prompt').length, 1);
+  assert.ok(!f.calls.some(call => ['close', 'remove', 'send-keys', 'send-text'].includes(call.argv[1])));
+});
+
+test('successful activity-wait replies preserve identity checks even after fast completion', async t => {
+  for (const status of ['working', 'done', 'idle']) {
+    const f = await fixture(t, { afterRun: (argv, _f, response) => {
+      if (argv[1] === 'prompt') response.result.agent.agent_status = status;
+      return response;
+    } });
+    const result = await f.controller.dispatch(f.request());
+    assert.equal(result.state, 'submitted', status);
+    assert.equal(f.calls.filter(call => call.argv[1] === 'prompt').length, 1);
+  }
+  const replaced = await fixture(t, { afterRun: (argv, _f, response) => {
+    if (argv[1] === 'prompt') response.result.agent.terminal_id = 'replacement';
+    return response;
+  } });
+  const result = await replaced.controller.dispatch(replaced.request());
+  assert.equal(result.state, 'uncertain'); assert.equal(result.code, 'changed_target');
+  assert.equal(replaced.calls.filter(call => call.argv[1] === 'prompt').length, 1);
+  assert.ok(!replaced.calls.some(call => ['close', 'remove'].includes(call.argv[1])));
+});
+
 for (const kind of ['tab', 'workspace', 'worktree', 'split']) test(`${kind}: one creation, no-focus, exact args and prompt, complete owned receipt`, async t => {
   const f = await fixture(t);
   if (kind === 'workspace') { f.snapshot.panes[0].cwd = f.temp; f.snapshot.panes[0].foreground_cwd = f.temp; }
@@ -108,7 +172,7 @@ for (const kind of ['tab', 'workspace', 'worktree', 'split']) test(`${kind}: one
   assert.equal(result.placement.targetKind, kind); assert.equal(creations(f).length, 1);
   assert.ok(creations(f)[0].argv.includes('--no-focus'));
   assert.deepEqual(f.calls.find(c => c.argv[1] === 'start').argv.slice(-5), ['--', ...request.args]);
-  assert.deepEqual(f.calls.find(c => c.argv[1] === 'prompt').argv, ['agent', 'prompt', result.paneId, request.prompt]);
+  assert.deepEqual(f.calls.find(c => c.argv[1] === 'prompt').argv, ['agent', 'prompt', result.paneId, request.prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.deepEqual(progress.map(e => e.stage), ['queued', 'target', 'start', 'prompt']);
   assert.ok(progress.every(e => e.taskId === request.taskId && e.attemptId === request.attemptId));
   if (kind === 'worktree') {

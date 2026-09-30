@@ -36,11 +36,14 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       const occupant = snapshot.agents?.find(a => a.paneId === task.target?.paneId && a.terminalId === task.target?.terminalId);
       const agent = occupant && matches(task.target, occupant) ? occupant : null;
       const replaced = Boolean(occupant && !agent);
-      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), identity: identity(task.target), launch: task.launch?.state, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
+      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), identity: identity(task.target), launch: task.launch?.state,
+        launchCode: task.launch?.code ?? null, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
       current.set(task.id, value);
       const old = previous.get(task.id);
       if (!baseline || !value.paneId || !value.terminalId || replaced) continue;
       const setup = value.launch === 'needs_input' && old?.launch !== 'needs_input';
+      const stalled = value.launch === 'uncertain' && value.launchCode === 'agent_prompt_stalled'
+        && (old?.launch !== 'uncertain' || old?.launchCode !== 'agent_prompt_stalled');
       const sameTarget = old?.identity === value.identity;
       // An idle shell may precede execution. Only a real agent's done status
       // supports first-observation completion; synthetic unknown is no evidence.
@@ -50,11 +53,13 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       // the target. Its first blocked observation still needs attention.
       const firstBlocked = ['submitted', 'uncertain'].includes(value.launch) && value.observed && value.status === 'blocked'
         && (!old?.paneId || (sameTarget && !old.observed));
-      if (!setup && !firstCompletion && !firstBlocked && !sameTarget) continue;
+      if (!setup && !stalled && !firstCompletion && !firstBlocked && !sameTarget) continue;
       let transition, title, body = task.label, sound;
       const label = `${safeText(task.project)} · ${safeText(names.get(task.provider) ?? task.provider ?? 'Agent')}`;
       if (setup) {
         transition = 'setup'; title = `⚠ ${label} needs setup`; body = task.launch.message; sound = 'request';
+      } else if (stalled) {
+        transition = 'pickup'; title = `⚠ ${label} needs attention`; body = task.launch.message; sound = 'request';
       } else if (old?.status !== 'blocked' && value.status === 'blocked'
         && !(old?.launch === 'needs_input' && !old.observed)) {
         transition = 'blocked'; title = `⚠ ${label} needs input`; sound = 'request';

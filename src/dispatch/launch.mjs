@@ -1,6 +1,10 @@
 import { LIMITS, MESSAGES as DISPATCH_MESSAGES } from './contracts.mjs';
 import { safeText } from '../terminal.mjs';
 
+// Herdr's no-activity gate is five seconds. Keep its verdict inside the
+// existing eight-second transport timeout; this applies only to first prompts.
+const PROMPT_ACTIVITY_TIMEOUT_MS = 6000;
+
 // Startup and delivery deliberately have no retry path. The immutable target
 // receipt stays attached to failed/uncertain outcomes and remote panes stay open.
 export function createLaunchRunner(deps) {
@@ -46,7 +50,8 @@ export function createLaunchRunner(deps) {
         }
         if (!['idle', 'done'].includes(current.agent.agent_status)) return finish(outcome('uncertain', 'The new agent is not ready for a prompt. Inspect the preserved pane before sending work.', { ...details(), code: 'agent_not_ready' }));
         await observe(job, 'prompt');
-        const submitted = await invoke(['agent', 'prompt', pane.pane_id, request.prompt], { timeoutMs: LIMITS.followUpTimeoutMs });
+        const submitted = await invoke(['agent', 'prompt', pane.pane_id, request.prompt,
+          '--wait', '--until', 'working', '--timeout', String(PROMPT_ACTIVITY_TIMEOUT_MS)], { timeoutMs: LIMITS.followUpTimeoutMs });
         compareAgent(target, submitted.result?.agent);
         return finish(outcome('submitted', 'Prompt submitted. Herdr will report the agent’s live status.', { ...details(), ...(Array.isArray(start.result.argv) ? { argv: [...start.result.argv] } : {}) }));
       } finally { operationLocks.delete(`pane:${pane.pane_id}`); }
@@ -55,6 +60,9 @@ export function createLaunchRunner(deps) {
       if (error.trust && job.stage === 'target' && !job.trustRetry && !trusted(error.trust.root)) {
         job.trustRoot = error.trust.root;
         return finish(outcome('needs_confirmation', DISPATCH_MESSAGES.needsTrust.replace('{root}', safeText(error.trust.root)), { ...details(), code: 'untrusted_repository' }));
+      }
+      if (job.stage === 'prompt' && code === 'agent_prompt_stalled') {
+        return finish(outcome('uncertain', 'Prompt not picked up. Check the pane.', { ...details(), code }));
       }
       if (NEEDS_INPUT.has(code)) return finish(outcome('needs_input', 'The agent needs attention in its pane. The prompt was not sent; review trust, authentication or approval there.', { ...details(), code }));
       const uncertain = job.mutated && (UNCERTAIN.has(code) || job.stage === 'prompt');

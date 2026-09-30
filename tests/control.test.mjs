@@ -99,7 +99,7 @@ test('dispatch passes exact literal prompt and verified pane/workspace identitie
   assert.equal(result.state, 'submitted', result.message);
   assert.deepEqual(writes(f).map(c => c.argv.slice(0,2).join('.')), ['pane.split', 'agent.start', 'agent.prompt']);
   assert.deepEqual(f.calls.find(c => c.argv[1] === 'split').argv, ['pane', 'split', '--pane', 'w1:p1', '--direction', 'right', '--cwd', temporary, '--no-focus']);
-  assert.deepEqual(f.calls.find(c => c.argv[1] === 'prompt').argv, ['agent', 'prompt', 'w1:p9', prompt]);
+  assert.deepEqual(f.calls.find(c => c.argv[1] === 'prompt').argv, ['agent', 'prompt', 'w1:p9', prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.equal(f.calls.find(c => c.argv[1] === 'start').options.timeoutMs, 35000);
   assert.equal(f.calls.find(c => c.argv[1] === 'prompt').options.timeoutMs, 8000);
   assert.ok(f.calls.every(c => c.options.signal instanceof AbortSignal));
@@ -260,7 +260,7 @@ process.stdout.write(JSON.stringify(response));
   const prompt = '--wait\n$(touch /tmp/shep-never) `echo nope` "quote"\t羊';
   assert.equal((await controller.dispatch(request({ prompt }))).state, 'submitted');
   const commands = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(commands.find(c => c.args[1] === 'prompt').args, ['agent', 'prompt', 'w1:p9', prompt]);
+  assert.deepEqual(commands.find(c => c.args[1] === 'prompt').args, ['agent', 'prompt', 'w1:p9', prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.ok(commands.every(c => c.socket === context.env.HERDR_SOCKET_PATH && c.own === 'w1:p1' && c.marker === 'pinned'));
   controller.dispose();
 });

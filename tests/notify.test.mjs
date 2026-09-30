@@ -155,7 +155,7 @@ test('real task outcomes retain conservative notifications regardless of snapsho
   }
 });
 
-function blockedLifecycle({ state = 'submitted', settings = {}, boundAtStartup = false, sessionId } = {}) {
+function blockedLifecycle({ state = 'submitted', settings = {}, boundAtStartup = false, sessionId, status = 'blocked', code, message = state } = {}) {
   const at = '2026-09-27T12:00:00.000Z', project = makeProject();
   const spec = { kind: 'dispatch', agents: [{ provider: 'codex', profile: null }], project, mode: 'auto', modeIntent: 'auto',
     subfolder: '', template: null, task: 'Review code', inputTask: 'Review code', command: '/dispatch Review code' };
@@ -163,10 +163,10 @@ function blockedLifecycle({ state = 'submitted', settings = {}, boundAtStartup =
   let task = createTask(spec, { id: 'review', attemptId: 'attempt', at, name: 'review-codex', placement });
   task = transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage: 'target', at } });
   const agent = { paneId: 'new-pane', terminalId: 'new-terminal', provider: 'codex', name: task.name,
-    agentName: task.name, sessionId: sessionId ?? null, status: 'blocked', focused: false };
+    agentName: task.name, sessionId: sessionId ?? null, status, focused: false };
   const snapshot = { mode: 'live', source: { state: 'connected' }, agents: [] }, calls = [];
   const bind = () => {
-    task = transition(task, { type: 'outcome', outcome: { ok: state === 'submitted', state, message: state,
+    task = transition(task, { type: 'outcome', outcome: { ok: state === 'submitted', state, message, ...(code ? { code } : {}),
       taskId: task.id, attemptId: task.attemptId, paneId: agent.paneId, terminalId: agent.terminalId, agentName: task.name } });
     // Session identity is optional in captured targets. When known it must also
     // match, although the current controller outcome only supplies the tuple/name.
@@ -227,4 +227,55 @@ test('new opt-in external blocked agents establish a baseline without using task
   f.tick(); f.tick(); assert.equal(f.calls.length, 0);
   f.snapshot.agents[0].status = 'working'; f.tick(); f.snapshot.agents[0].status = 'blocked'; f.tick();
   assert.equal(f.calls.length, 1); assert.equal(f.calls[0].sound, 'request'); f.dispose();
+});
+
+const stalledOutcome = { state: 'uncertain', code: 'agent_prompt_stalled', status: 'idle', message: 'Prompt not picked up. Check the pane.' };
+
+test('a stalled first prompt needs attention once even while its matching agent remains idle', () => {
+  for (const metadataMissing of [false, true]) {
+    const f = blockedLifecycle(stalledOutcome);
+    f.bind();
+    if (metadataMissing) f.snapshot.agents = [];
+    f.tick(); f.tick();
+    assert.equal(f.calls.length, 1);
+    assert.match(f.calls[0].title, /needs attention/);
+    assert.equal(f.calls[0].body, stalledOutcome.message);
+    assert.equal(f.calls[0].sound, 'request');
+    f.snapshot.agents = [f.agent];
+    for (let i = 0; i < 20; i++) f.tick();
+    assert.equal(f.calls.length, 1, 'The same stalled outcome must not repeat or imply idle completion');
+    f.dispose();
+  }
+});
+
+test('stalled-prompt attention preserves startup, focus, enabled, demo and disconnected suppression', () => {
+  for (const suppression of ['startup', 'focused', 'disabled', 'demo', 'disconnected']) {
+    const f = blockedLifecycle({ ...stalledOutcome, boundAtStartup: suppression === 'startup', settings: { enabled: suppression !== 'disabled' } });
+    if (suppression !== 'startup') f.bind();
+    if (suppression === 'focused') f.agent.focused = true;
+    if (suppression === 'demo') f.snapshot.mode = 'demo';
+    if (suppression === 'disconnected') f.snapshot.source.state = 'disconnected';
+    f.tick(); f.tick();
+    assert.equal(f.calls.length, 0, suppression); f.dispose();
+  }
+  const silent = blockedLifecycle({ ...stalledOutcome, settings: { sound: false, onlyWhenUnfocused: false } });
+  silent.bind(); silent.agent.focused = true; silent.tick();
+  assert.equal(silent.calls.length, 1); assert.equal(silent.calls[0].sound, 'none'); silent.dispose();
+});
+
+test('stalled-prompt attention rejects a replacement occupant before attributing its idle status', () => {
+  for (const field of ['provider', 'agentName', 'sessionId']) for (const missing of [false, true]) {
+    const f = blockedLifecycle({ ...stalledOutcome, sessionId: 'known-session' });
+    f.bind();
+    if (missing) delete f.agent[field]; else f.agent[field] = 'replacement';
+    if (field === 'agentName') { if (missing) delete f.agent.name; else f.agent.name = 'replacement'; }
+    f.tick(); f.tick(); assert.equal(f.calls.length, 0, `${field}/${missing}`); f.dispose();
+  }
+});
+
+test('ordinary uncertain or submitted idle outcomes do not become pickup warnings', () => {
+  for (const outcome of [{ state: 'uncertain', code: 'timeout' }, { state: 'submitted' }]) {
+    const f = blockedLifecycle({ ...outcome, status: 'idle' });
+    f.bind(); f.tick(); f.tick(); assert.equal(f.calls.length, 0); f.dispose();
+  }
 });
