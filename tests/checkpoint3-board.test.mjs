@@ -182,7 +182,7 @@ test('failed tasks with retained panes require private absence; public-agent abs
     getControlSnapshot: async () => available ? { panes: present ? [{ pane_id: 'retained-pane', terminal_id: 'retained-terminal' }] : [], agents: [], tabs: [], workspaces: [] } : {},
   } });
   await launch(); model.action('cancel'); model.key('c'); await tick();
-  assert.equal(model.getSnapshot().notice.message, 'This agent is still open. Close it with x first, or keep it.');
+  assert.equal(model.getSnapshot().notice.message, 'Pane retained-pane is still open, but no agent is detected. Close that pane in Herdr, then clear this task.');
   assert.equal(model.getTasks()[0].dismissed, false); assert(!calls.some(call => call.method === 'dismissTask'));
   available = false; model.key('c'); await tick(); assert.equal(model.getTasks()[0].dismissed, false);
   assert.match(model.getSnapshot().notice.message, /could not be verified/);

@@ -27,6 +27,11 @@ export function deferredCommand(command, context = {}) {
     const knownProject = project && [...(context.projects ?? []), ...(context.trustRequired ?? [])].some(entry =>
       [entry.name, ...(entry.aliases ?? [])].some(name => name.toLowerCase() === project.toLowerCase()));
     if (!knownAgents && !knownProject) return null;
+    if (agent.includes('.') && !prefix.includes('@') && !agent.includes(',') && !prefix.endsWith('+wt')) {
+      const [provider, profile, extra] = agent.split('.');
+      // A filename such as codex.md is literal unless it names a configured profile.
+      if (extra !== undefined || !Object.hasOwn(context.config?.agents?.[provider]?.profiles ?? {}, profile)) return null;
+    }
   }
   if (agent.includes(',') || agent.includes('.')) return 'Named profiles and multiple agents are not enabled. Choose one provider, optionally @project.';
   const mode = prefix.includes('+') ? prefix.slice(prefix.indexOf('+') + 1) : null;
@@ -312,7 +317,11 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
           if (read().snapshot.mode !== 'live' || read().snapshot.source.state !== 'connected') throw new Error('Reconnect to Herdr to verify that this task’s pane is closed.');
           const snapshot = await controller.getControlSnapshot();
           if (!Array.isArray(snapshot?.panes)) throw new Error('Pane closure could not be verified. Refresh before clearing this task.');
-          if (snapshot.panes.some(pane => panes.some(target => pane.pane_id === target.paneId || pane.terminal_id === target.terminalId))) { inform(openMessage, 'warning'); return; }
+          const retained = snapshot.panes.find(pane => panes.some(target => pane.pane_id === target.paneId || pane.terminal_id === target.terminalId));
+          if (retained) {
+            const detected = read().snapshot.agents.some(agent => agent.paneId === retained.pane_id && agent.terminalId === retained.terminal_id);
+            inform(detected ? openMessage : `Pane ${retained.pane_id} is still open, but no agent is detected. Close that pane in Herdr, then clear this task.`, 'warning'); return;
+          }
         }
         if (!alive) return;
         const current = read().tasks.find(item => item.id === task.id);
