@@ -7,7 +7,7 @@
 
 Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
 
-This branch provides **0.4.0-checkpoint.1**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, follow-ups from Shep, worktree cleanup controls and additional shell subcommands are deferred.
+This branch provides **0.4.0-checkpoint.2**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, follow-ups from Shep, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
@@ -63,7 +63,7 @@ The public default branch may still be 0.3.0 while this preview is unpushed. To 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.1.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.2.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -108,7 +108,7 @@ Press **n** for the composer: provider, project or **Other folder…**, subfolde
 
 Use `/dispatch codex@shep+here: your task` to keep a task in the main checkout even when another agent is working there. You are choosing to share that checkout, so coordinate edits. Task details show an automatically created worktree's path and its manual removal command, `herdr worktree remove --workspace <id>`. Review and preserve its changes before removing it. The **W** cleanup action is the first planned post-checkpoint item; `+wt`, fan-out, named profiles and templates remain deferred.
 
-**Known sign-in limitation:** if an agent needs sign-in, Shep may submit the task into that screen, as 0.3.0 does. Herdr's readiness signal does not guarantee that authentication is complete. Sign in before dispatching; if setup appears, inspect the created pane before sending anything again. Shep does not add authentication handling or screen parsing.
+**Startup-screen limitation:** sign-in screens, update notices and trust questions can receive or lose a task sent during startup. Keep agent CLIs signed in and updated before dispatching. If a pane shows setup, inspect it before sending anything. Shep waits briefly for Herdr to observe prompt activity; if Herdr reports that the prompt stalled, Shep marks the launch uncertain with “Prompt not picked up. Check the pane.” and sends a needs-attention notification under your notification settings. It preserves the pane and prompt and never retries automatically. This activity check does not parse screens or answer setup dialogs.
 
 Press **g** to switch between Tasks grouped by project and Agents grouped by provider. Tasks and drafts last only for this run. After restarting, still-running agents appear in the Agents view.
 

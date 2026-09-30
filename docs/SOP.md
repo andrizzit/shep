@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.1, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.2, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, automatic placement, a task board, notifications and change summaries. Later fan-out, templates, named profiles, persisted history, in-Shep follow-ups and cleanup controls are deferred.
 
@@ -99,11 +99,13 @@ To deliberately share the main checkout, use `/dispatch codex@shep+here: your ta
 
 If Git rejects a repository for dubious ownership, Shep can ask you to trust that exact canonical root. Cancel is the default. Confirmation is saved in Shep's config and applies only to that repository. Agent authentication and provider trust dialogs still require your attention in the created pane.
 
-Shep starts the provider through Herdr, checks readiness, and submits the prompt. Wait for the result message before issuing another dispatch. Once submission completes, you can dispatch another task while the first agent continues working.
+Shep starts the provider through Herdr, checks readiness, submits the first prompt once, and briefly waits for Herdr to observe activity. Wait for the result message before issuing another dispatch. Once submission completes, you can dispatch another task while the first agent continues working.
 
-**Known sign-in limitation:** if an agent needs sign-in, Shep may submit the task into that screen, as 0.3.0 does. Complete sign-in before dispatching. If setup appears, inspect the created pane before sending anything again; successful submission does not prove the task was accepted. Shep does not add authentication handling or screen parsing.
+**Startup-screen limitation:** sign-in screens, update notices and trust questions can receive or lose a task sent during startup. Keep agent CLIs signed in and updated before dispatching. If a pane shows setup, inspect it before sending anything. Shep uses Herdr's activity signal without parsing screens or answering setup dialogs.
 
-**Expected result:** a submitted task with a pane ID in the Tasks view, plus the agent in its provider group. Submission confirms delivery; inspect subsequent status and output to confirm the agent actually worked on the task. Tab accepts a command/provider/project suggestion; Enter submits. Up/Down recalls single-line commands from this run.
+If Herdr reports a stalled prompt, Shep shows **uncertain** with “Prompt not picked up. Check the pane.” and sends a needs-attention notification under your notification settings. The task text and created pane are preserved. Shep never retries the prompt automatically; inspect the pane before deciding what to send.
+
+**Expected result:** a submitted task with a pane ID in the Tasks view, plus the agent in its provider group. A submitted first task means Herdr's activity wait succeeded; it does not prove that the specific task finished. Inspect subsequent status and output to confirm the outcome. Tab accepts a command/provider/project suggestion; Enter submits. Up/Down recalls single-line commands from this run.
 
 ## 4. Write a useful task
 
@@ -329,7 +331,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.1.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.2.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 
