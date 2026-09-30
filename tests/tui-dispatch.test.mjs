@@ -243,6 +243,60 @@ test('summaries use actual target cwd, throttle ten seconds and reject reused ag
   assert.equal(model.getTasks()[0].summary.changedFiles, 2);
 });
 
+test('stalled prompt warning survives live Idle, summary and focus while preserving draft and retry hold', async t => {
+  for (const source of ['command', 'compose']) {
+    const requests = [], focused = []; let closed = 0;
+    const message = 'Prompt not picked up. Check the pane.';
+    const summary = { state: 'available', changedFiles: 0, insertions: 0, deletions: 0, commitsAhead: 0, at: new Date().toISOString() };
+    const { model, publish } = await setup({ summarize: async () => summary, controller: {
+      dispatch: async (request, { onProgress }) => {
+        requests.push(request);
+        await onProgress({ taskId: request.taskId, attemptId: request.attemptId, stage: 'prompt', at: new Date().toISOString() });
+        return { ok: false, state: 'uncertain', code: 'agent_prompt_stalled', message, taskId: request.taskId, attemptId: request.attemptId,
+          paneId: 'w1:p7', terminalId: 'terminal7', agentName: request.name,
+          placement: { mode: 'here', targetKind: 'tab', reason: 'Auto → here', cwd: project.root, notices: [] } };
+      },
+      focus: async target => { focused.push(target); return { ok: true, state: 'focused', message: 'Focused.' }; },
+      closeAgent: async () => { closed += 1; return { ok: true, state: 'closed', message: 'Closed.' }; },
+    } }); t.after(model.destroy);
+    const prompt = 'Keep this literal prompt.\n$(not-a-command)';
+    if (source === 'command') model.paste('/dispatch codex: ' + prompt);
+    else { model.action('new'); model.action('field', 'prompt'); model.paste(prompt); }
+    const before = model.getSnapshot();
+    const submit = () => source === 'command' ? model.key('', { return: true }) : model.key('s', { ctrl: true });
+    submit(); await tick();
+    assert.equal(model.getSnapshot().view, source);
+    assert.equal(requests[0].prompt, prompt);
+    assert.match(model.getSnapshot().notice.message, /^Prompt not picked up\. Check the pane\./);
+    assert.equal(model.getTasks()[0].launch.code, 'agent_prompt_stalled');
+
+    const agent = { id: 'terminal7', terminalId: 'terminal7', paneId: 'w1:p7', provider: 'codex', name: requests[0].name,
+      agentName: requests[0].name, sessionId: 'native-session7', status: 'idle', workspace: { path: project.root } };
+    publish({ agents: [agent] }); await tick();
+    assert.equal(model.getTasks()[0].live.status, 'idle');
+    assert.equal(model.getTasks()[0].launch.state, 'uncertain');
+    assert.deepEqual(model.getTasks()[0].summary, summary);
+    submit(); await tick(); assert.equal(requests.length, 1, 'Enter/Ctrl+S must not resend a stalled prompt');
+    model.action('focus-result'); await tick();
+    assert.equal(focused.length, 1); assert.deepEqual(focused[0], agent);
+    assert.equal(model.getSnapshot().notice.message, 'Focused.', 'Focus replaces the transient launch warning');
+    assert.equal(model.getSnapshot().dispatchHold, true);
+    assert.deepEqual(model.getSnapshot().draft, { ...before.draft, prompt });
+    assert.equal(model.getSnapshot().command, before.command);
+
+    model.key('', { escape: true });
+    // Below the split-panel threshold, only the task row can expose the warning.
+    const board = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 87, height: 30 }));
+    assert.match(board, /Idle/);
+    assert(board.includes(message), 'The row warning must remain visible instead of the Git summary');
+    const compact = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 39, height: 14, offset: 1 }));
+    assert.match(compact, /Idle/); assert.match(compact, /Prompt not picked up\./);
+    assert(readCompactDetail(model).includes('Launch: uncertain · ' + message));
+    assert.equal(requests.length, 1); assert.equal(closed, 0);
+    assert.equal(model.getSnapshot().dispatchHold, true);
+  }
+});
+
 test('Other folder is session-only, preserves relative subfolder and never writes config', async t => {
   const picked = makeProject({ key: 'dir:/fixture/other', root: '/fixture/other', name: 'other', kind: 'folder', commonDir: null, sources: ['session'] });
   const registry = createFakeRegistry({ overrides: { registerEphemeral: path => path === '/fixture/other/src' ? { project: picked, subfolder: 'src' } : { error: 'Choose an existing absolute folder.', code: 'invalid_folder' } } });

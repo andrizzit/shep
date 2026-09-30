@@ -103,8 +103,8 @@ const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000
 function taskSubline(row) {
   if (!row.task) return row.agent.workspace?.path || 'Path unavailable';
   const task = row.task;
-  if (['done', 'idle'].includes(row.status) && task.summary) return summaryLabel(task.summary);
   if (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(task.launch.state)) return task.launch.message;
+  if (['done', 'idle'].includes(row.status) && task.summary) return summaryLabel(task.summary);
   if (task.placement) return task.placement.mode === 'worktree' ? `worktree ${task.created?.worktree?.branch || task.placement.cwd}` : `${task.placement.targetKind} · ${task.placement.cwd}`;
   return task.launch.message;
 }
