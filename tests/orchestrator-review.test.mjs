@@ -480,7 +480,7 @@ test('orchestrator QA: prompt punctuation and multiline content remain one liter
   assert.equal(result.state, 'submitted');
   const sent = fixture.calls.filter(({ argv }) => argv[0] === 'agent' && argv[1] === 'prompt');
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].argv, ['agent', 'prompt', 'w1:p9', prompt]);
+  assert.deepEqual(sent[0].argv, ['agent', 'prompt', 'w1:p9', prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'split').length, 1);
   assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'start').length, 1);
   assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'close').length, 0);
@@ -620,7 +620,7 @@ test('orchestrator QA: three launches run, the fourth queues FIFO, and disposal 
   assert.deepEqual(progress.get(requests[4].taskId), ['queued']);
   assert.equal(fixture.controller.dispatch(requests[0]), pending[0]);
   assert.deepEqual(fixture.calls.filter(({ argv }) => argv[1] === 'prompt').map(({ argv }) => argv), [
-    ['agent', 'prompt', submitted.paneId, requests[0].prompt],
+    ['agent', 'prompt', submitted.paneId, requests[0].prompt, '--wait', '--until', 'working', '--timeout', '6000'],
   ]);
 
   fixture.controller.dispose();
