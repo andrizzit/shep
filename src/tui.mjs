@@ -335,15 +335,16 @@ function NoticeDetail({ state, model, width, height, registry }) {
 
 function Suggestions({ state, model, width, registry }) {
   const candidates = state.suggestions || [];
+  const hint = line('↑↓ choose · Tab/Enter accept', { color: C.faint });
   if (width < 70) {
     const item = candidates[state.suggestionIndex];
-    return h(Box, { height: 1, flexShrink: 0 },
+    return h(Box, { height: 2, flexShrink: 0, flexDirection: 'column' }, h(Box, { height: 1, flexShrink: 0 },
       h(Button, { label: 'Next', registry, id: 'suggest-next', action: () => model.action('suggest-next') }),
-      h(Click, { registry, id: 'suggest-current', action: () => model.action('suggestion', state.suggestionIndex), flexGrow: 1, minWidth: 0, backgroundColor: C.selected }, line(`Tab ${item?.label || ''}`, { color: C.orange })));
+      h(Click, { registry, id: 'suggest-current', action: () => model.action('suggestion', state.suggestionIndex), flexGrow: 1, minWidth: 0, backgroundColor: C.selected }, line(`Tab ${item?.label || ''}`, { color: C.orange }))), hint);
   }
   const cell = Math.max(5, Math.floor(width / Math.max(1, candidates.length)) - 2);
-  return h(Box, { height: 1, flexShrink: 0 }, ...candidates.map((item, index) =>
-    h(Button, { key: index, label: truncate(item.label, cell), active: index === state.suggestionIndex, registry, id: `suggest-${index}`, action: () => model.action('suggestion', index) })));
+  return h(Box, { height: 2, flexShrink: 0, flexDirection: 'column' }, h(Box, { height: 1, flexShrink: 0 }, ...candidates.map((item, index) =>
+    h(Button, { key: index, label: truncate(item.label, cell), active: index === state.suggestionIndex, registry, id: `suggest-${index}`, action: () => model.action('suggestion', index) }))), hint);
 }
 
 export function noticeLines(state, width) {
@@ -376,7 +377,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view) ? 0 : 3;
   const footerHeight = short ? 1 : 2;
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : state.dispatchHold ? 3 : 2;
-  const suggestionHeight = state.view === 'command' && state.suggestions.length ? 1 : 0;
+  const suggestionHeight = state.view === 'command' && state.suggestions.length ? 2 : 0;
   const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
   const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
   const listWidth = split ? Math.floor(width * .52) : width;

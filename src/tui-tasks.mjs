@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { relative, isAbsolute } from 'node:path';
 import { parseCommand, suggest } from './dispatch/grammar.mjs';
 import { agentName, tabLabel } from './dispatch/naming.mjs';
-import { DEFAULT_CONFIG, validateArgs, validatePlacementIntent, validatePrompt } from './dispatch/contracts.mjs';
+import { DEFAULT_CONFIG, PROVIDER_IDS, validateArgs, validatePlacementIntent, validatePrompt } from './dispatch/contracts.mjs';
 import { createTask, transition, groupTasks } from './tasks.mjs';
 import { safeText } from './terminal.mjs';
 
@@ -12,19 +12,30 @@ export const taskRows = state => taskGroups(state).flatMap(group => group.rows);
 
 // These workflows exist in the grammar foundation, but are deliberately not
 // enabled in this checkpoint. Inspect only syntax, never the literal task body.
-export function deferredCommand(command) {
+export function deferredCommand(command, context = {}) {
   const name = /^\/([^\s]*)/.exec(command)?.[1]?.toLowerCase();
   if (name && name !== 'dispatch') return 'This checkpoint supports /dispatch only. Templates and other commands are not enabled.';
-  const prefix = /^\/dispatch[ \t]+([^\s:]+):/i.exec(command)?.[1];
+  const colonPrefix = /^\/dispatch[ \t]+([^\s:]+):/i.exec(command)?.[1];
+  const prefix = colonPrefix ?? /^\/dispatch[ \t]+([^\s:]+)(?:[ \t]|$)/i.exec(command)?.[1];
   if (!prefix) return null;
   const agent = prefix.split('@')[0].split('+')[0];
+  if (!colonPrefix) {
+    // A deferred provider form remains explicit even if its project is unknown.
+    // Ordinary dotted words, paths and unknown project-only tokens stay literal.
+    const knownAgents = agent && agent.split(',').every(value => PROVIDER_IDS.includes(value.split('.')[0]));
+    const project = /^@([^+]+)(?:\+[^+]*)?$/.exec(prefix)?.[1];
+    const knownProject = project && [...(context.projects ?? []), ...(context.trustRequired ?? [])].some(entry =>
+      [entry.name, ...(entry.aliases ?? [])].some(name => name.toLowerCase() === project.toLowerCase()));
+    if (!knownAgents && !knownProject) return null;
+  }
   if (agent.includes(',') || agent.includes('.')) return 'Named profiles and multiple agents are not enabled. Choose one provider, optionally @project.';
-  if (prefix.includes('+') && prefix.slice(prefix.indexOf('+') + 1) !== 'here') return 'Only +here is enabled in this checkpoint; +wt remains deferred. Omit the mode for automatic isolation.';
+  const mode = prefix.includes('+') ? prefix.slice(prefix.indexOf('+') + 1) : null;
+  if (mode !== null && (colonPrefix ? mode !== 'here' : mode === 'wt')) return 'Only +here is enabled in this checkpoint; +wt remains deferred. Omit the mode for automatic isolation.';
   return null;
 }
 
 export function commandSuggestions(command, cursor, context) {
-  if (!/^\/[^\s]*$/.test(command) && deferredCommand(command)) return [];
+  if (!/^\/[^\s]*$/.test(command) && deferredCommand(command, context)) return [];
   command = command.replace(/^\/dispatch(?=[ \t]|$)/i, '/dispatch');
   const before = command.slice(0, cursor);
   const prefix = /^\/dispatch[ \t]+([^\s:]*)$/.exec(before)?.[1];
@@ -86,7 +97,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
   }
   function openDecision(decision) { change({ decision: { ...decision, confirm: false, offset: 0, returnView: read().view }, view: 'decision' }); }
   function parse(command) {
-    const deferred = deferredCommand(command);
+    const deferred = deferredCommand(command, context());
     if (deferred) return { error: deferred, code: 'deferred' };
     const result = parseCommand(command.replace(/^\/dispatch(?=[ \t]|$)/i, '/dispatch'), context());
     if (!result.error) result.command = command;

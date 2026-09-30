@@ -109,7 +109,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     confirmation: null, confirmClose: false, dispatchHold: false, resultTarget: null,
     tasks: [], projects: [], trustRequired: [], projectsLoading: true, projectsError: null, projectWarnings: [],
     decision: null, requiredNotice: null, detailOffset: 0, projectQuery: '', pickerIndex: 0, folderPath: '', folderLoading: false,
-    suggestions: [], suggestionIndex: 0, recall: [], recallIndex: null, recallDraft: '',
+    suggestions: [], suggestionIndex: 0, suggestionArrowMoved: false, recall: [], recallIndex: null, recallDraft: '',
   };
   function change(patch) {
     if (!alive) return;
@@ -171,7 +171,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   const submitCommand = () => { void dispatch('command'); };
   function updateSuggestions() {
     const cursor = graphemes(state.command).slice(0, state.cursor.command).join('').length;
-    change({ suggestions: commandSuggestions(state.command, cursor, session.context()), suggestionIndex: 0 });
+    change({ suggestions: commandSuggestions(state.command, cursor, session.context()), suggestionIndex: 0, suggestionArrowMoved: false });
   }
   function acceptSuggestion(index = state.suggestionIndex) {
     const suggestion = state.suggestions[index];
@@ -328,8 +328,11 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       if (key.escape && state.recallIndex !== null) { change({ command: state.recallDraft, recallIndex: null, cursor: { ...state.cursor, command: graphemes(state.recallDraft).length } }); updateSuggestions(); }
       else if (key.escape) change({ view: 'board' });
       else if (key.tab) { if (key.shift) change({ suggestionIndex: (state.suggestionIndex + 1) % Math.max(1, state.suggestions.length) }); else acceptSuggestion(); }
+      else if ((key.upArrow || key.downArrow) && state.suggestions.length) {
+        change({ suggestionIndex: (state.suggestionIndex + (key.upArrow ? -1 : 1) + state.suggestions.length) % state.suggestions.length, suggestionArrowMoved: true });
+      }
       else if ((key.upArrow || key.downArrow) && recall(key.upArrow ? -1 : 1)) return;
-      else if (key.return) submitCommand();
+      else if (key.return) { if (state.suggestionArrowMoved && state.suggestions.length) acceptSuggestion(); else submitCommand(); }
       else edit(input, key);
       return;
     }
