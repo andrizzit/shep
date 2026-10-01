@@ -294,7 +294,7 @@ test('stalled prompt warning survives live Idle, summary and focus while preserv
     assert(board.includes(message), 'The row warning must remain visible instead of the Git summary');
     const compact = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 39, height: 14, offset: 1 }));
     assert.match(compact, /Needs you/); assert.match(compact, /Prompt not picked up\./);
-    assert(readCompactDetail(model).includes('Launch: uncertain · ' + message));
+    assert(readCompactDetail(model).includes('Startup: ' + message));
     assert.equal(requests.length, 1); assert.equal(closed, 0);
     assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
     model.action('cancel'); model.paste('/dispatch A separate task'); model.key('', { return: true }); await tick();

@@ -144,7 +144,7 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
     `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Awaiting target'}`,
     `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
     ...(worktree ? [`Branch: ${worktree.branch}`, `Worktree path: ${worktree.path}`, 'Manual removal in current Herdr instance:', `herdr worktree remove --workspace ${workspaceArg}`] : []),
-    `Launch: ${task.launch.state} · ${task.launch.message}`, `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`,
+    `Startup: ${task.launch.message}`, `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`,
     ...(task.locationNotice ? ['Location notice (exact):', task.locationNotice.event.message, `Full subfolder: ${task.locationNotice.subfolder}`] : []),
     summaryLabel(task.summary), ...(task.summary?.at ? [`Checked: ${task.summary.at}`] : []), ...(task.summary?.message ? [task.summary.message] : [])];
   const lines = content.flatMap(text => wrappedLines(text, Math.max(1, width - 4)));

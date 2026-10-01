@@ -69,7 +69,7 @@ Other examples:
 The syntax is:
 
 ```text
-/dispatch [provider][@project[/subfolder]][+here][:] task description
+/dispatch [provider][@project][+here|+wt][:] task description
 /dispatch task description
 ```
 
@@ -84,6 +84,8 @@ The brackets indicate an optional part; do not type the brackets.
 | `/dispatch claude@folio your task` | Claude in folio, when installed and known |
 | `/dispatch @folio your task` | Codex in the known folio project |
 | `/dispatch your task` | **Codex**, unless the first word is a clear prefix |
+
+Project prefixes accept names or aliases. Set a relative subfolder in the composer’s **Subfolder** field; `/subfolder` is not part of a project prefix.
 
 The colon is optional for a clear prefix: a lowercase installed provider, a known `@project`, or their combination, optionally with `+here`. `/dispatch claude review this code` now sends `review this code` to Claude. Capitalized words (`Claude`), unavailable providers, unknown projects and file mentions (`@src/app.ts`) remain part of the literal Codex task. With a colon, unknown or unavailable providers and unknown projects keep their strict errors. Profiles and fan-out remain refused with or without a colon. `+wt` requests a worktree with either prefix form.
 

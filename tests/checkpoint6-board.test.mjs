@@ -203,3 +203,27 @@ test('visible filter cycle has one category per label and includes every Needs y
   for (let index = 0; index < 5; index += 1) { agentLabels.push(f.model.getSnapshot().filter); f.model.key('f'); }
   assert.equal(new Set(agentLabels).size, agentLabels.length); assert.equal(f.model.getSnapshot().filter, 'done');
 });
+
+test('task detail keeps startup evidence and Needs you without internal launch-state labels', async t => {
+  for (const launchState of ['needs_input', 'uncertain', 'submitted']) {
+    const message = 'Check the agent pane.';
+    const f = await fixture(t, { dispatch: () => ({ ok: launchState === 'submitted', state: launchState, message }) });
+    const task = await f.send('/dispatch Review startup');
+    f.publish({ agents: [f.agent(task, 'blocked')] }); f.model.action('details');
+    for (const [width, height] of [[119, 39], [39, 14]]) {
+      f.model.action('detail-position', 0);
+      let screens = '';
+      for (let scroll = 0; scroll < 30; scroll += 1) {
+        const screen = stripVTControlCharacters(renderToString(React.createElement(TuiView, { state: f.model.getSnapshot(), model: f.model, width, height })));
+        assert(screen.split('\n').length <= height); assert(screen.split('\n').every(line => displayWidth(line) <= width));
+        screens += screen + '\n';
+        if (screens.includes('Startup: ' + message)) break;
+        f.model.key('', { downArrow: true });
+      }
+      assert.match(screens, /Needs you/); assert(screens.includes('Startup: ' + message));
+      assert.doesNotMatch(screens, /Launch:|\b(?:needs_input|uncertain|submitted)\b/);
+    }
+    assert.equal(f.model.getTasks()[0].launch.state, launchState);
+    assert.equal(f.model.getTasks()[0].launch.message, message);
+  }
+});
