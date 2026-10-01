@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.4, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.5, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, automatic placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -111,7 +111,7 @@ Shep starts the provider through Herdr, checks readiness, submits the first prom
 
 If Herdr reports a stalled prompt, Shep shows **uncertain** with “Prompt not picked up. Check the pane.” and sends a needs-attention notification under your notification settings. The task text and created pane are preserved. Shep never retries the prompt automatically; inspect the pane before deciding what to send.
 
-**Expected result:** a submitted task with a pane ID in the Tasks view, plus the agent in its provider group. A submitted first task means Herdr's activity wait succeeded; it does not prove that the specific task finished. Inspect subsequent status and output to confirm the outcome. When suggestions are showing, Up/Down chooses one with wraparound. Enter accepts only after you moved the highlight with an arrow; otherwise it submits. Tab accepts and Shift+Tab cycles suggestions. With no suggestions, Up/Down recalls single-line commands from this run and Esc restores your displaced draft.
+**Expected result:** a submitted task with a pane ID in the Tasks view, plus the agent in its provider group. A submitted first task means Herdr's activity wait succeeded; it does not prove that the specific task finished. Inspect subsequent status and output to confirm the outcome. Agent and project suggestions appear vertically below the command line; the list scrolls to keep the highlight visible and uses fewer rows in compact panes. Click a row to accept it. When suggestions are showing, Up/Down chooses one with wraparound. Enter accepts only after you moved the highlight with an arrow; otherwise it submits. Tab accepts and Shift+Tab cycles suggestions. With no suggestions, Up/Down recalls single-line commands from this run and Esc restores your displaced draft.
 
 ## 4. Write a useful task
 
@@ -134,7 +134,7 @@ Shep automatically isolates a Git checkout when another agent is working there. 
 1. Return to the overview with **Esc** if you are editing a command.
 2. Press **n** to open setup and the optional composer.
 3. Move between fields with **Tab** or **Shift+Tab**.
-4. Select the provider and open the project picker. Filter the list, choose a project, or choose **Other folder…** and enter an existing absolute path.
+4. In the focused provider field, choose from the vertical list of installed agents with **↑/↓** or **←/→**; **Enter** or **Tab** advances. Open the project picker. Filter the list, choose a project, or choose **Other folder…** and enter an existing absolute path.
 5. Set an optional subfolder and task name. Check the placement preview and working directory.
 6. Press **Esc** to retain your draft and return to the overview.
 
@@ -349,7 +349,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.4.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.5.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 
