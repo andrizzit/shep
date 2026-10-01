@@ -106,6 +106,8 @@ export const LAUNCH_STATES = freeze([
   'queued', 'starting', 'submitted', 'needs_input', 'needs_confirmation', 'uncertain', 'failed',
 ]);
 export const LAUNCH_OUTCOMES = freeze(['submitted', 'needs_input', 'needs_confirmation', 'uncertain', 'failed']);
+export const DELIVERY_POLICIES = freeze(['auto', 'type']);
+export const DELIVERY_MODES = freeze(['launch', 'type']);
 export const FINAL_LAUNCH_STATES = freeze(['submitted', 'needs_input', 'uncertain', 'failed']);
 export const LIVE_STATES = freeze(['working', 'blocked', 'done', 'idle', 'unknown', 'closed']);
 export const PROGRESS_STAGES = freeze(['queued', 'target', 'start', 'prompt']);
@@ -356,13 +358,22 @@ export const VALIDATION_PROBLEMS = freeze({
  * @property {string} [paneId]
  * @property {string} [terminalId]
  * @property {string} [agentName]
+ * @property {'launch'|'type'} [delivery] Selected delivery route, never a receipt by itself. Submitted with launch means started with its task, not completed.
  * @property {string[]} [argv] Private in-memory field; redact credential-like arguments in notices.
  * @property {ActualPlacement} [placement] Authoritative controller result, not UI preview.
  * @property {CreatedResources} [created] Retained on every later failure/uncertain result.
  */
 /**
  * Controller interface:
- * createController({context,monitor,mode,run,readRaw,config,getConfig,registry,git,fs,now,randomHex,onNotice})
+ * createController({context,monitor,mode,run,readRaw,config,getConfig,registry,git,fs,now,randomHex,onNotice,delivery='auto'})
+ * delivery='auto' passes eligible Claude/Codex/Grok tasks as one literal startup
+ * argument; other providers, leading '-', single-word, newline and tab tasks use
+ * the unchanged typed path. delivery='type' is a fixture compatibility setting.
+ * CLI fixtures may set SHEP_TEST_DELIVERY=type; it only selects that same path,
+ * never bypasses checks, never writes config, and is unset for default-path QA.
+ * No launch-path failure ever retries or falls back to typing. A startup timeout
+ * can mean the exact created agent is already working: only fresh identity-bound
+ * observation supports submitted in that case; otherwise preserve uncertainty.
  * dispatch(request,{onProgress}={}) -> Promise<Outcome>;
  * onProgress(event) -> void|Promise<void>.
  * getProfiles() -> Promise<existing profiles plus {snapshot: private Herdr snapshot}>.
@@ -408,9 +419,10 @@ export const VALIDATION_PROBLEMS = freeze({
  * are not freed merely because an unready shell appears; reconcile the receipt safely.
  */
 /**
- * Placement decision order: fan-out > explicit mode > project.isolation > auto.
- * Auto is worktree only for Git and a working/blocked main-checkout agent or in-flight
- * reservation; known linked-worktree paths are excluded. Plain folders use here.
+ * Placement: explicit wt or project.isolation=always uses a worktree; otherwise
+ * use the main folder, including occupied or reserved checkouts and explicit here.
+ * Fan-out remains deferred. Known linked-worktree paths are excluded when finding
+ * the main workspace. Worktree mode requires Git; ordinary plain folders use here.
  * Workspace eligibility: worktree=null OR verified is_linked_worktree=false primary
  * metadata whose canonical checkout/root/commonDir agree with the Project. Linked,
  * unknown or mismatched metadata is excluded. The same rule applies to discovery.
@@ -420,7 +432,7 @@ export const VALIDATION_PROBLEMS = freeze({
  * Plan: {targetKind,mode,reason,sourceRoot,cwd,workspaceId?,anchorPane?,notices}.
  * cwd is null for a not-yet-created worktree; sourceRoot is never claimed as its cwd.
  * mode is here|worktree; anchorPane is the complete selected split-pane identity.
- * Folder projects with isolation always fail before mutation unless overridden by here.
+ * Folder projects with isolation always fail before mutation; here does not override it.
  * preparePlacementSnapshot(snapshot,{realpath}) asynchronously supplies canonical cwd
  * facts first, shared by preview/execution. Resolve registry projectKey and verify its
  * canonical root agrees with intent before taking its lock; caller paths confer no trust.
@@ -764,6 +776,7 @@ export function validateOutcome(outcome, { dispatch = true } = {}) {
   add(errors, states.includes(outcome.state), 'state', 'invalid_outcome', 'must be a documented outcome');
   add(errors, typeof outcome.ok === 'boolean' && outcome.ok === ['submitted', 'focused', 'closed', 'removed', 'dismissed'].includes(outcome.state), 'ok', 'invalid_outcome', 'must agree with outcome state');
   add(errors, typeof outcome.message === 'string', 'message', 'invalid_outcome', VALIDATION_PROBLEMS.string);
+  if (outcome.delivery !== undefined) add(errors, DELIVERY_MODES.includes(outcome.delivery), 'delivery', 'invalid_outcome', 'must be launch or type');
   if (dispatch) for (const key of ['taskId', 'attemptId']) add(errors, nonempty(outcome[key]), key, 'invalid_outcome', 'must correlate the dispatch attempt');
   if (outcome.stage !== undefined) add(errors, OUTCOME_STAGES.includes(outcome.stage), 'stage', 'invalid_outcome', 'must be target, start or prompt');
   if (outcome.placement !== undefined) errors.push(...prefixed(validateActualPlacement(outcome.placement), 'placement'));

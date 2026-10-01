@@ -148,7 +148,7 @@ test('blocked follow-up preserves text and shows the exact pane-input instructio
   assert.equal(model.getSnapshot().followUp.text, 'Answer after approval'); assert.equal(calls.length, 0);
 });
 
-test('c dismisses failed and confirmed closed tasks locally; C dismisses only closed tasks', async t => {
+test('c and C dismiss failed and confirmed closed tasks locally without closing open agents', async t => {
   const { model, calls, launch, topology, publish } = await fixture(t, { agents: [] });
   const first = await launch('First'), second = await launch('Second');
   topology.panes = []; publish({ agents: [] }); await tick();
@@ -169,8 +169,11 @@ test('c dismisses failed and confirmed closed tasks locally; C dismisses only cl
 
   const failed = await fixture(t, { agents: [], controller: { dispatch: async request => ({ ok: false, state: 'failed', message: 'Before creation', taskId: request.taskId, attemptId: request.attemptId }) } });
   await failed.launch(); failed.model.action('cancel'); failed.model.key('C'); await tick();
-  assert.equal(failed.model.getTasks()[0].dismissed, false);
-  failed.model.key('c'); await tick(); assert.equal(failed.model.getTasks()[0].dismissed, true);
+  assert.equal(failed.model.getTasks()[0].dismissed, true);
+  await failed.launch('Separate failed task'); failed.model.action('cancel');
+  failed.model.key('c'); await tick(); assert.equal(failed.model.getTasks()[1].dismissed, true);
+  assert.equal(failed.calls.filter(call => call.method === 'dismissTask').length, 2);
+  assert(!failed.calls.some(call => call.method === 'closeAgent'));
 });
 
 test('failed tasks with retained panes require private absence; public-agent absence never permits clearing an open pane', async t => {
@@ -197,7 +200,7 @@ test('new board controls and follow-up editor fit 120×40 and 40×15 without hid
     const render = () => renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width, height }));
     const board = render(); assert.match(board, /p Send/);
     model.key('p'); const editor = render();
-    assert.match(editor, /External Codex/); assert.match(editor, /Idle/); assert.match(editor, /w1:p2/);
+    assert.match(editor, /External Codex/); assert.match(editor, /Done/); assert.match(editor, /w1:p2/);
     assert.match(editor, /Send Ctrl\+S/); assert.match(editor, /Back Esc/);
     assert(editor.split('\n').length <= height); assert(editor.split('\n').every(line => displayWidth(line) <= width));
     model.key('', { escape: true });
@@ -206,7 +209,7 @@ test('new board controls and follow-up editor fit 120×40 and 40×15 without hid
   closed.topology.panes = []; closed.publish({ agents: [] }); await tick();
   for (const [width, height] of [[119, 39], [39, 14]]) {
     const board = renderToString(React.createElement(TuiView, { state: closed.model.getSnapshot(), model: closed.model, width, height }));
-    assert.match(board, /c Clear/); assert.match(board, /C Closed/);
+    assert.match(board, /c Clear/); assert.match(board, /C All/);
     assert(board.split('\n').length <= height); assert(board.split('\n').every(line => displayWidth(line) <= width));
   }
 });

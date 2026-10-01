@@ -98,10 +98,11 @@ async function layoutCase({ columns, rows, color }) {
 
     model.action('field', 'provider');
     const base = model.getSnapshot();
-    for (const extra of [{}, { dispatchHold: true }, { dispatchHold: true, draft: { ...base.draft, subfolder: 'src/api' }, projects: [makeProject({ key: base.draft.projectKey })] },
+    for (const extra of [{}, { busy: 'focus' }, { draft: { ...base.draft, subfolder: 'src/api' }, projects: [makeProject({ key: base.draft.projectKey })] },
       { requiredNotice: { token: 'fixture-notice', subfolder: 'src/api', event: { message: 'Worktree starts at repository root; selected subfolder is not applied' } } }]) {
       const { screen } = await draw({ ...base, ...extra });
       assert.match(screen, /Dispatch agent/);
+      assert.doesNotMatch(screen, /Allow.*launch|Ctrl\+Y/);
       if (columns === 40) assert.match(screen, /Prev.*Next.*Back/);
       else { assert.match(screen, /Project/); assert.match(screen, /Name \(optional\)/); }
       assert(entries('provider-').length >= 1);

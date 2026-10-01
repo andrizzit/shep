@@ -1,7 +1,7 @@
 import React, { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { render, Box, Text, useInput, usePaste, useWindowSize, measureElement } from 'ink';
 import { createTuiModel, visibleAgents, knownStatus, STATUS_LABELS, providerName, FIELDS, graphemes, parseMouse, hitTest, controlBlock } from './tui-model.mjs';
-import { taskGroups, taskRows, TASK_LABELS, displayArgs, summaryLabel } from './tui-tasks.mjs';
+import { taskGroups, taskRows, TASK_LABELS, taskPresentation, displayArgs, summaryLabel } from './tui-tasks.mjs';
 import { safeText, displayWidth } from './terminal.mjs';
 
 export const TUI_COLORS = Object.freeze({ canvas: '#111b19', panel: '#172420', selected: '#293f34', border: '#465c4e', ink: '#eef2e8', muted: '#acb9ac', faint: '#829889', orange: '#f09365', working: '#e5c86e', blocked: '#f18b89', done: '#7fd3c7', idle: '#93cd95', unknown: '#a2aaa5' });
@@ -98,12 +98,12 @@ export function boardRows(state) {
   if (state.boardView !== 'tasks') return listRows(state);
   return taskGroups(state).flatMap(group => [{ type: 'project', group }, ...group.rows.flatMap(row => [{ type: 'task', row }, { type: 'task-path', row }])]);
 }
-const taskColor = status => status === 'closed' ? C.faint : C[status] || (['failed', 'needs_input', 'needs_confirmation'].includes(status) ? C.blocked : C.working);
+const taskColor = status => status === 'closed' ? C.faint : C[status] || (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(status) ? C.blocked : C.working);
 const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000 ? '<1m' : milliseconds < 3600000 ? `${Math.floor(milliseconds / 60000)}m` : `${Math.floor(milliseconds / 3600000)}h`;
 function taskSubline(row) {
   if (!row.task) return row.agent.workspace?.path || 'Path unavailable';
   const task = row.task;
-  if (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(task.launch.state)) return task.launch.message;
+  if (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(taskPresentation(row))) return task.launch.message;
   if (['done', 'idle'].includes(row.status) && task.summary) return summaryLabel(task.summary);
   if (task.placement) return task.placement.mode === 'worktree' ? `worktree ${task.created?.worktree?.branch || task.placement.cwd}` : `${task.placement.targetKind} · ${task.placement.cwd}`;
   return task.launch.message;
@@ -119,7 +119,7 @@ function TaskList({ state, model, width, height, registry, offset = 0, compactAc
       return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('select-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
         item.type === 'task' ? h(Box, { width: '100%', justifyContent: 'space-between' },
           h(Box, { flexGrow: 1, minWidth: 0 }, line(`${active ? '›' : ' '} ${row.label}`, { bold: active })),
-          line(` ${width > 65 ? providerName(row.task?.agent.provider || row.agent?.provider) + ' ' : ''}${TASK_LABELS[row.status] || 'Unknown'} ${elapsed(row.elapsedMs)}`, { color: taskColor(row.status) })) : line(`  ${taskSubline(row)}`, { color: active ? C.muted : C.faint }));
+          line(` ${width > 65 ? providerName(row.task?.agent.provider || row.agent?.provider) + ' ' : ''}${TASK_LABELS[taskPresentation(row)] || 'Starting'} ${elapsed(row.elapsedMs)}`, { color: taskColor(taskPresentation(row)) })) : line(`  ${taskSubline(row)}`, { color: active ? C.muted : C.faint }));
     }),
     !rows.length && line(state.projectsLoading ? 'Projects loading…' : state.query || state.filter !== 'all' ? 'No matching tasks.' : 'No tasks yet. /dispatch starts one.', { color: C.faint }),
     h(Box, { flexGrow: 1 }),
@@ -139,9 +139,9 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
   // This is a copyable command only. Use the response-confirmed creation
   // receipt, never infer ownership from a discovered path or placement mode.
   const workspaceArg = worktree && (/^[\w:.-]+$/.test(worktree.workspaceId) ? worktree.workspaceId : `'${worktree.workspaceId.replaceAll("'", "'\\''")}'`);
-  const content = [task.inputTask, '', `${providerName(task.agent.provider)} · ${TASK_LABELS[row.status]} · ${elapsed(row.elapsedMs)}`,
+  const content = [task.inputTask, '', `${providerName(task.agent.provider)} · ${TASK_LABELS[taskPresentation(row)]} · ${elapsed(row.elapsedMs)}`,
     `Project: ${task.project.name}`, task.project.root, `Requested subfolder: ${task.subfolder || '(root)'}`,
-    `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Automatic · awaiting target'}`,
+    `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Awaiting target'}`,
     `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
     ...(worktree ? [`Branch: ${worktree.branch}`, `Worktree path: ${worktree.path}`, 'Manual removal in current Herdr instance:', `herdr worktree remove --workspace ${workspaceArg}`] : []),
     `Launch: ${task.launch.state} · ${task.launch.message}`, `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`,
@@ -226,11 +226,11 @@ function FollowUpEditor({ state, model, width, height, registry }) {
 function Composer({ state, model, width, height, registry }) {
   const provider = state.profiles.providers.find(item => item.id === state.draft.provider);
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
-  const narrow = height < (state.dispatchHold ? 26 : 23);
+  const narrow = height < 23;
   const locationPreview = project?.kind === 'git' && Boolean(state.draft.subfolder) && !state.requiredNotice;
   const providerRows = Math.max(1, Math.min(5, height - 8 - Number(locationPreview)));
   const promptRows = Math.max(2, Math.min(7, height - 15 - Number(locationPreview) - (state.field === 'provider' ? providerRows - 1 : 0)));
-  const blocked = controlBlock(state) || state.dispatchHold || !provider?.available || state.profilesLoading;
+  const blocked = controlBlock(state) || !provider?.available || state.profilesLoading;
   const title = name => ({ provider: 'Provider', name: 'Name (optional)', projectKey: 'Project', subfolder: 'Subfolder (optional)', prompt: 'Task', dispatch: 'Launch' })[name];
   const renderField = field => {
     const active = state.field === field;
@@ -259,7 +259,7 @@ function Composer({ state, model, width, height, registry }) {
     if (field === 'provider') value = `${provider?.name || 'Loading…'}${provider && !provider.available ? ' · unavailable' : ''}`;
     else if (field === 'projectKey') value = `${project?.name || (state.projectsLoading ? 'Projects loading…' : 'Choose a project')}  Enter / click`;
     else value = state.draft[field];
-    const fieldHeight = field === 'prompt' ? narrow ? Math.max(1, height - (state.dispatchHold ? 12 : 9) - Number(locationPreview)) : promptRows : 1;
+    const fieldHeight = field === 'prompt' ? narrow ? Math.max(1, height - 9 - Number(locationPreview)) : promptRows : 1;
     const content = ['prompt', 'name', 'subfolder'].includes(field) && active ? editorLines(value, state.cursor[field], Math.max(3, width - 6), fieldHeight) : field === 'prompt' ? value.split('\n').slice(0, fieldHeight).map(value => safeText(value)) : [safeText(value)];
     return h(Click, { key: field, registry, id: `field-${field}`, action: () => model.action('field', field), flexDirection: 'column', flexShrink: 0, minHeight: fieldHeight + 1 },
       line(`${active ? '›' : ' '} ${title(field)}${field === 'prompt' ? ' · Enter newline' : ''}`, { color, bold: active }),
@@ -272,7 +272,7 @@ function Composer({ state, model, width, height, registry }) {
     locationPreview ? h(Box, { height: 2, flexShrink: 0, flexDirection: 'column' },
       line('If worktree: starts at repo root;', { color: C.working }),
       line("selected subfolder isn't applied.", { color: C.working })) :
-      line(state.profilesError || state.projectsError || (narrow ? 'Tab: next field · draft stays on Esc' : 'Automatic isolation · auth remains in the agent pane'), { color: state.profilesError ? C.blocked : C.faint }),
+      line(state.profilesError || state.projectsError || (narrow ? 'Tab: next field · draft stays on Esc' : 'Main checkout by default · auth stays in the agent pane'), { color: state.profilesError ? C.blocked : C.faint }),
     ...fields.map(renderField),
     narrow && h(Box, { gap: 1, flexShrink: 0 },
       h(Button, { label: '‹ Prev', registry, id: 'field-prev', action: () => model.action('field-next', -1) }),
@@ -280,7 +280,7 @@ function Composer({ state, model, width, height, registry }) {
       h(Button, { label: 'Back', registry, id: 'compose-back', action: () => model.action('cancel') })),
     h(Box, { flexGrow: 1 }),
     !(narrow && state.field === 'provider' && height < 9 + Number(locationPreview)) && (state.field === 'provider' && provider?.reason ? line(provider.reason, { color: provider.available ? C.faint : C.working }) :
-      line(state.field === 'provider' ? '↑↓ / ←→ choose · Enter/Tab next' : state.field === 'subfolder' ? 'Automatic isolation; worktrees start at root.' : state.field === 'projectKey' ? (project?.root || 'Choose Project or Other folder…') : state.field === 'name' ? 'Name: a-z then a-z, 0-9, _ or -; max 32.' : state.field === 'prompt' ? `${Buffer.byteLength(state.draft.prompt)} / 65536 prompt bytes · paste supported` : controlBlock(state) || '←/→ choose · Tab next · Esc keeps draft', { color: C.faint })));
+      line(state.field === 'provider' ? '↑↓ / ←→ choose · Enter/Tab next' : state.field === 'subfolder' ? 'Main checkout; configured worktrees start at root.' : state.field === 'projectKey' ? (project?.root || 'Choose Project or Other folder…') : state.field === 'name' ? 'Name: a-z then a-z, 0-9, _ or -; max 32.' : state.field === 'prompt' ? `${Buffer.byteLength(state.draft.prompt)} / 65536 prompt bytes · paste supported` : controlBlock(state) || '←/→ choose · Tab next · Esc keeps draft', { color: C.faint })));
 }
 function Confirmation({ state, model, width, height, registry }) {
   const target = state.confirmation;
@@ -406,7 +406,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const headerHeight = short ? 1 : compact ? 2 : 4;
   const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up'].includes(state.view) ? 0 : 3;
   const footerHeight = short ? 1 : 2;
-  const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : state.dispatchHold ? 3 : 2;
+  const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : 2;
   const suggestionRows = state.view === 'command' && state.suggestions.length ? Math.max(1, Math.min(5, state.suggestions.length, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - 5)) : 0;
   const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
   const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
@@ -416,21 +416,21 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const activePanel = state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
   const List = state.boardView === 'tasks' ? TaskList : AgentList;
   const notice = state.notice?.message || (state.snapshot.source.state !== 'connected' ? `${state.snapshot.updatedAt ? 'Stale snapshot. ' : ''}${state.snapshot.source.message || 'Waiting for Herdr…'}` : state.snapshot.mode === 'demo' ? 'Sample agents only. Launch, focus and close are disabled.' : state.view === 'command' ? 'Colon optional for clear prefixes. Enter submits unless arrows selected a suggestion.' : state.view === 'confirm' ? 'Review the captured identity. Cancel is selected by default.' : state.view === 'compose' ? 'Optional launch settings. Escape keeps your draft.' : 'Ready. Type /dispatch your task, or select an agent to focus its native pane.');
-  let footer = ['command', 'compose'].includes(state.view) && state.dispatchHold ? 'Ctrl+F focus pane · Ctrl+Y allow new · Esc back' : state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n setup  s search  f filter  q quit';
+  let footer = state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n setup  s search  f filter  q quit';
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
   if (state.view === 'follow-up') footer = 'Ctrl+S send · Esc keeps draft';
   const boardActions = ['board', 'detail'].includes(state.view);
   const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
   const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
-  const closedTasks = state.tasks.some(task => !task.dismissed && task.live.status === 'closed');
+  const clearableTasks = state.tasks.some(task => !task.dismissed && (task.live.status === 'closed' || task.launch.state === 'failed'));
   const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n Setup → Project'}`;
-  const commandValue = state.command || '/dispatch [agent][@project][+here][:] task';
+  const commandValue = state.command || '/dispatch [agent][@project][+wt][:] task';
   const commandDisplay = state.view === 'command' ? editorLines(state.command, state.cursor.command, Math.max(4, width - (width < 70 ? 4 : 10)), 1)[0] : commandValue;
   return h(Box, { width, height, flexDirection: 'column', backgroundColor: C.canvas, overflow: 'hidden' },
     h(Box, { height: headerHeight, flexShrink: 0, alignItems: compact ? 'flex-start' : 'center', gap: 1 },
       h(Dog, { compact }),
-      h(Box, { flexDirection: 'column', flexGrow: 1, minWidth: 0 }, line('shep.  Your agents, together.', { bold: true, color: C.orange }), !short && line(`${agents.length} agents · ${agents.filter(agent => agent.status === 'working').length} working · ${agents.filter(agent => agent.status === 'blocked').length} need input`, { color: C.muted })),
+      h(Box, { flexDirection: 'column', flexGrow: 1, minWidth: 0 }, line('shep.  Your agents, together.', { bold: true, color: C.orange }), !short && line(`${agents.length} agents · ${agents.filter(agent => agent.status === 'working').length} working · ${agents.filter(agent => agent.status === 'blocked').length} need you`, { color: C.muted })),
       h(Box, { flexDirection: 'column', flexShrink: 0, maxWidth: Math.floor(width * .35) }, line(status.label, { color: status.color, bold: true }), !compact && line(state.snapshot.source.scope || 'Current Herdr session', { color: C.faint }))),
     toolbarHeight > 0 && h(Box, { height: toolbarHeight, flexShrink: 0, flexDirection: 'column' },
       state.view === 'command' && width < 70 ? h(Box, { height: 1, flexShrink: 0 },
@@ -455,16 +455,13 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
         ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
     state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
-      h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4))),
-      state.dispatchHold && h(Box, { gap: 1, flexShrink: 0 },
-        h(Button, { label: 'Allow new launch', registry, id: 'notice-allow', action: () => model.action('allow-launch') }),
-        state.resultTarget && h(Button, { label: 'Focus pane', registry, id: 'notice-focus', action: () => model.action('focus-result') }))),
+      h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4)))),
     h(Box, { height: footerHeight, flexDirection: 'column', flexShrink: 0 },
       h(Box, { height: 1, flexShrink: 0 },
         h(Button, { label: short ? 'Quit' : 'Quit Ctrl+C', registry, id: 'quit', action: () => model.action('quit') }),
         boardActions && h(Button, { label: 'p Send', registry, id: 'follow-up', disabled: !model.selected() || Boolean(controlBlock(state)), action: () => model.action('follow-up') }),
         boardActions && clearable && h(Button, { label: 'c Clear', registry, id: 'clear', action: () => model.action('clear') }),
-        boardActions && closedTasks && h(Button, { label: 'C Closed', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),
+        boardActions && clearableTasks && h(Button, { label: 'C All', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),
         h(Box, { flexGrow: 1, minWidth: 0 }, line(footer, { color: C.muted }))),
       !short && h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint }))));
 }
@@ -480,7 +477,7 @@ function App({ model, url, output, registry, onNoticeRendered }) {
   const [offset, setOffset] = useState(0);
   const rows = boardRows(state);
   const header = height < 25 ? 2 : 4;
-  const capacity = Math.max(1, height - header - (state.dispatchHold ? 13 : 12));
+  const capacity = Math.max(1, height - header - 12);
   const maxOffset = Math.max(0, rows.length - capacity);
   const selectedRow = rows.findIndex(row => row.type === 'agent' && row.agent.id === state.selectedId || row.type === 'task' && row.row.id === state.selectedTaskId);
   useEffect(() => {

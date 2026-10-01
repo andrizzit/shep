@@ -13,15 +13,15 @@ test('placement decision table covers explicit policies, busy status and folder 
   for (const isolation of ['auto', 'always', 'never']) for (const mode of ['auto', 'here', 'wt']) for (const busy of [false, true]) {
     const snapshot = makeSnapshot(); if (busy) snapshot.agents.push({ agent: 'codex', agent_status: 'working', cwd: project.root });
     const result = await decide({ project: { ...project, isolation }, intent: { ...intent, mode }, snapshot });
-    const expected = mode === 'here' ? 'here' : mode === 'wt' || isolation === 'always' || (isolation === 'auto' && busy) ? 'worktree' : 'here';
+    const expected = mode === 'wt' || isolation === 'always' ? 'worktree' : 'here';
     assert.equal(result.mode, expected, `${isolation}/${mode}/${busy}`);
   }
   for (const status of ['blocked', 'working', 'done', 'idle', 'unknown']) {
     const snapshot = makeSnapshot(); snapshot.agents.push({ agent: 'codex', agent_status: status, cwd: project.root + '/src' });
-    assert.equal((await decide({ snapshot })).mode, ['blocked', 'working'].includes(status) ? 'worktree' : 'here');
+    assert.equal((await decide({ snapshot })).mode, 'here');
   }
   await assert.rejects(decide({ project: { ...project, kind: 'folder', isolation: 'always' } }), { code: 'worktree_needs_git' });
-  assert.equal((await decide({ project: { ...project, kind: 'folder', isolation: 'always' }, intent: { ...intent, mode: 'here' } })).mode, 'here');
+  await assert.rejects(decide({ project: { ...project, kind: 'folder', isolation: 'always' }, intent: { ...intent, mode: 'here' } }), { code: 'worktree_needs_git' });
 });
 
 test('main checkout excludes linked worktrees, sibling prefix paths and failed canonicalization', async () => {
@@ -32,7 +32,7 @@ test('main checkout excludes linked worktrees, sibling prefix paths and failed c
   const snapshot = makeSnapshot(); snapshot.agents.push({ agent_status: 'working', cwd: '/unknown' });
   const prepared = await preparePlacementSnapshot(snapshot, { realpath: async path => { if (path === '/unknown') throw Error(); return path; } });
   assert.equal(resolvePlacement({ intent, project, snapshot: prepared }).mode, 'here');
-  assert.equal((await decide({ reservations: [{ projectKey: project.key, cwd: project.root }] })).mode, 'worktree');
+  assert.equal((await decide({ reservations: [{ projectKey: project.key, cwd: project.root }] })).mode, 'here');
 });
 
 test('workspace order prefers exact label then matching panes then native number', async () => {

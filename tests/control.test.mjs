@@ -72,7 +72,7 @@ function fixture({ beforeRun, afterRun, readRaw, context, monitorState = 'connec
     } else throw new Error(`Unexpected command ${argv.slice(0,2).join(' ')}`);
     return afterRun ? await afterRun(argv, raw, response, options) ?? response : response;
   };
-  const controller = createController({ context: context ?? contextFor(), monitor, mode, run, readRaw: readRaw ?? (async () => structuredClone(raw)) });
+  const controller = createController({ context: context ?? contextFor(), monitor, mode, delivery: 'type', run, readRaw: readRaw ?? (async () => structuredClone(raw)) });
   return { controller, raw, calls, run };
 }
 const writes = f => f.calls.filter(c => ['split', 'start', 'prompt', 'focus', 'close'].includes(c.argv[1]));
@@ -255,7 +255,7 @@ process.stdout.write(JSON.stringify(response));
   const moduleExecutable = executable + '.mjs';
   await writeFile(moduleExecutable, await readFile(executable), { mode: 0o755 });
   const context = contextFor({ HERDR_BIN_PATH: moduleExecutable, TEST_STATE: statePath, TEST_LOG: logPath, TEST_MARKER: 'pinned' });
-  const controller = createController({ context, monitor: { getSnapshot: () => ({ mode: 'live', source: { state: 'connected' } }) } });
+  const controller = createController({ context, delivery: 'type', monitor: { getSnapshot: () => ({ mode: 'live', source: { state: 'connected' } }) } });
   context.env.TEST_MARKER = 'changed-after-creation';
   const prompt = '--wait\n$(touch /tmp/shep-never) `echo nope` "quote"\t羊';
   assert.equal((await controller.dispatch(request({ prompt }))).state, 'submitted');

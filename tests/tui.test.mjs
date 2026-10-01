@@ -74,18 +74,19 @@ test('dispatch captures selected provider/project/prompt and rejects duplicate p
   assert.equal(model.getSnapshot().draft.prompt, '');
 });
 
-test('partial launch keeps draft, prevents blind retry, and focuses the controller-tracked pane', async t => {
+test('partial launch keeps draft, allows another independent launch, and focuses the controller-tracked pane', async t => {
   let launches = 0;
   const { model, calls } = await harness({ dispatch: async () => { launches += 1; return { ok: false, state: 'needs_input', message: 'Complete authentication.', paneId: 'w1:p7', terminalId: 't7', agentName: 'new-worker' }; } }); t.after(model.destroy);
   model.action('new'); model.action('field', 'prompt'); model.paste('Keep this prompt.');
   model.action('dispatch'); await settle();
   model.action('dispatch'); await settle();
-  assert.equal(launches, 1);
+  assert.equal(launches, 2);
   assert.equal(model.getSnapshot().draft.prompt, 'Keep this prompt.');
+  assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
   model.action('focus-result'); await settle();
   assert.equal(calls[0][0], 'focus'); assert.equal(calls[0][1].terminalId, 't7');
-  model.action('allow-launch'); model.action('dispatch'); await settle();
-  assert.equal(launches, 2);
+  model.action('new'); model.action('dispatch'); await settle();
+  assert.equal(launches, 3);
 });
 
 test('close confirmation freezes target and refuses changed status or reused pane identity', async t => {
@@ -170,13 +171,16 @@ test('/dispatch unavailable provider never falls back; provider alone and invali
   assert.deepEqual(parseDispatch('/dispatch claude:  keep one leading space\nnext', model.getSnapshot().profiles.providers), { provider: 'claude', prompt: ' keep one leading space\nnext', explicitProvider: true });
 });
 
-test('command input captures control-like letters; partial command stays and blocks repeat Enter', async t => {
+test('command input captures control-like letters; partial command stays while board Enter opens the new pane', async t => {
   const { model, calls } = await harness({ dispatch: async draft => { calls.push(['dispatch', draft]); return { ok: false, state: 'uncertain', message: 'Check the new pane.', paneId: 'w1:p7', terminalId: 't7' }; } }); t.after(model.destroy);
   model.key('/dispatch codex: x q n / are literal');
   model.action('focus'); model.action('close'); assert.equal(calls.length, 0);
   model.key('', { return: true }); await settle(); model.key('', { return: true }); await settle();
-  assert.equal(calls.length, 1); assert.equal(model.getSnapshot().command, '/dispatch codex: x q n / are literal');
+  assert.equal(calls.filter(call => call[0] === 'dispatch').length, 1);
+  assert.equal(calls.filter(call => call[0] === 'focus').length, 1);
+  assert.equal(model.getSnapshot().command, '/dispatch codex: x q n / are literal');
   assert.equal(model.getSnapshot().draft.prompt, 'x q n / are literal');
+  assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
 });
 
 test('Ink fixtures fit desktop/narrow panes and preserve essential controls', async t => {

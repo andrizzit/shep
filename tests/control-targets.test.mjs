@@ -86,7 +86,7 @@ async function fixture(t, { beforeRun, afterRun, gitOverride, projectPatch, snap
     else throw new Error('Unexpected command ' + command);
     return await afterRun?.(argv, f, { result }, options) ?? { result };
   };
-  f.controller = createController({ context, monitor: { getSnapshot: () => ({ mode: 'live', source: { state: 'connected' } }) }, registry,
+  f.controller = createController({ context, delivery: 'type', monitor: { getSnapshot: () => ({ mode: 'live', source: { state: 'connected' } }) }, registry,
     getConfig: () => config, onNotice: message => notices.push(message), run, readRaw: async () => ({ result: { snapshot: clone(snapshot) } }), git,
     randomHex: length => (random++).toString(16).padStart(length, '0') });
   t.after(() => f.controller.dispose());
@@ -231,7 +231,7 @@ test('same-project creation locks, main-checkout reservations and 3-launch FIFO 
   const requests = Array.from({ length: 4 }, (_, i) => { const r = f.request({ taskId: `t${i}`, attemptId: `a${i}`, name: `agent-${i}` }); r.placement.mode = 'auto'; return r; });
   const pending = requests.map(r => f.controller.dispatch(r));
   await entered.promise;
-  assert.equal(creations(f).length, 3); assert.equal(creations(f)[0].argv[0], 'tab'); assert.equal(creations(f)[1].argv[0], 'worktree');
+  assert.equal(creations(f).length, 3); assert.equal(creations(f)[0].argv[0], 'tab'); assert.equal(creations(f)[1].argv[0], 'tab');
   assert.deepEqual([...starts].sort(), ['agent-0', 'agent-1', 'agent-2']);
   gates[1].resolve(); await pending[1];
   while (starts.length < 4) await new Promise(resolve => setImmediate(resolve));
@@ -252,13 +252,13 @@ test('dispose rejects queued launch without mutation and coalesces repeated atte
   assert.equal(f.calls.filter(c => c.argv[1] === 'prompt').length, 0);
 });
 
-test('uncertain unready pane reservation stays busy until owner dismissal', async t => {
+test('uncertain unready pane reservation no longer forces isolation before owner dismissal', async t => {
   let first = true;
   const f = await fixture(t, { afterRun: argv => { if (argv[1] === 'start' && first) { first = false; throw error('timeout'); } } });
   const request = f.request(); request.placement.mode = 'auto';
   const result = await f.controller.dispatch(request); assert.equal(result.state, 'uncertain');
   const next = f.request({ taskId: 'second', attemptId: 'second', name: 'second' }); next.placement.mode = 'auto';
-  assert.equal((await f.controller.dispatch(next)).placement.mode, 'worktree');
+  assert.equal((await f.controller.dispatch(next)).placement.mode, 'here');
   assert.equal(f.controller.dismissTask(request).state, 'dismissed');
   const last = f.request({ taskId: 'third', attemptId: 'third', name: 'third' }); last.placement.mode = 'auto';
   assert.equal((await f.controller.dispatch(last)).placement.mode, 'here');

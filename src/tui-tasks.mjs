@@ -6,8 +6,18 @@ import { DEFAULT_CONFIG, PROVIDER_IDS, validateArgs, validatePlacementIntent, va
 import { createTask, transition, groupTasks } from './tasks.mjs';
 import { safeText } from './terminal.mjs';
 
-export const TASK_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs input', done: 'Done', idle: 'Idle', unknown: 'Unknown', closed: 'Closed', queued: 'Queued', starting: 'Starting', needs_input: 'Needs setup', needs_confirmation: 'Needs trust', uncertain: 'Uncertain', failed: 'Failed' });
-export const taskGroups = state => groupTasks(state.tasks || [], state.snapshot.agents || [], state.projects || [], { query: state.query, filter: state.filter });
+export const TASK_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs you', done: 'Done', idle: 'Done', unknown: 'Starting', closed: 'Closed', queued: 'Starting', starting: 'Starting', needs_input: 'Needs you', needs_confirmation: 'Needs you', uncertain: 'Needs you', failed: 'Failed' });
+export const TASK_FILTERS = Object.freeze(['all', 'working', 'blocked', 'done', 'unknown', 'closed', 'failed']);
+// Keep native status and launch certainty separate. Idle alone does not resolve
+// a startup question or an uncertain delivery; observed work can supersede it.
+export const taskPresentation = row => row.task && ['uncertain', 'needs_input', 'needs_confirmation'].includes(row.task.launch.state)
+  && !['working', 'done', 'closed'].includes(row.status) && !(row.status === 'idle' && row.task.observedActivity) ? row.task.launch.state : row.status;
+export const taskGroups = state => groupTasks(state.tasks || [], state.snapshot.agents || [], state.projects || [], { query: state.query, filter: 'all' })
+  .map(group => {
+    const rows = group.rows.filter(row => state.filter === 'all' || !state.filter || TASK_LABELS[taskPresentation(row)] === TASK_LABELS[state.filter]);
+    return { ...group, rows, active: rows.some(row => !['Done', 'Failed', 'Closed'].includes(TASK_LABELS[taskPresentation(row)])) };
+  }).filter(group => group.rows.length)
+  .sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 export const taskRows = state => taskGroups(state).flatMap(group => group.rows);
 
 // These workflows exist in the grammar foundation, but are deliberately not
@@ -35,7 +45,7 @@ export function deferredCommand(command, context = {}) {
   }
   if (agent.includes(',') || agent.includes('.')) return 'Named profiles and multiple agents are not enabled. Choose one provider, optionally @project.';
   const mode = prefix.includes('+') ? prefix.slice(prefix.indexOf('+') + 1) : null;
-  if (mode !== null && (colonPrefix ? mode !== 'here' : mode === 'wt')) return 'Only +here is enabled in this checkpoint; +wt remains deferred. Omit the mode for automatic isolation.';
+  if (mode !== null && colonPrefix && !['here', 'wt'].includes(mode)) return 'Choose +here for the main checkout or +wt for a worktree.';
   return null;
 }
 
@@ -46,7 +56,7 @@ export function commandSuggestions(command, cursor, context) {
   const prefix = /^\/dispatch[ \t]+([^\s:]*)$/.exec(before)?.[1];
   const agent = prefix?.split('@')[0].split('+')[0];
   if (agent?.includes(',') || agent?.includes('.')) return [];
-  if (prefix?.includes('+')) return suggest(command, cursor, context).filter(item => item.value === 'here');
+  if (prefix?.includes('+')) return suggest(command, cursor, context).filter(item => ['here', 'wt'].includes(item.value));
   return suggest(command, cursor, context).filter(item => !/^\/(?!dispatch$)/.test(item.label));
 }
 
@@ -65,6 +75,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
   read, change, inform, acknowledgeNotice = async () => { throw new Error('The required location notice could not be displayed.'); }, now = () => Date.now() }) {
   let alive = true, discovery = 0, topologyPending = false, lastTopology = 0;
   const noticeJobs = new Set();
+  const closedTimers = new Map();
   const consent = new Set(), summaryAt = new Map(), summaryPending = new Set(), abort = new AbortController();
   let noticeQueue = Promise.resolve();
   const config = () => getConfig() || DEFAULT_CONFIG;
@@ -194,10 +205,13 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       cancelNotices(task.id, task.attemptId);
       updateTask(task.id, item => transition(item, { type: 'outcome', outcome: result }));
       const successful = result.ok && result.state === 'submitted';
-      const hold = !successful && (['uncertain', 'needs_input'].includes(result.state) || Boolean(result.paneId));
       const target = result.paneId ? { ...result, id: result.terminalId || result.paneId, provider: task.agent.provider, name: result.agentName || task.name, status: 'unknown', workspace: { path: result.placement?.cwd || task.project.root } } : null;
-      change({ busy: null, dispatchHold: hold, resultTarget: target, notice: { message: safeText(`${result.message}${result.paneId ? ` Pane: ${result.paneId}.` : ''}`), kind: successful ? 'success' : 'warning' },
-        ...(successful ? { view: 'board', command: '', draft: { ...read().draft, name: '', prompt: '' }, cursor: { ...read().cursor, command: 0, name: 0, prompt: 0 } } : {}) });
+      const provider = read().profiles.providers.find(item => item.id === task.agent.provider)?.name || task.agent.provider;
+      const message = successful ? `${provider} started in ${task.project.name} · Enter to open`
+        : `${TASK_LABELS[result.state] || 'Needs you'} · ${result.message}${result.paneId ? ` Pane: ${result.paneId}.` : ''}`;
+      change({ busy: null, resultTarget: target, notice: { message: safeText(message), kind: successful ? 'success' : 'warning' },
+        ...(successful || target ? { view: 'board', boardView: 'tasks', query: '', filter: 'all', selectedTaskId: `task:${task.id}`, detailOffset: 0 } : {}),
+        ...(successful ? { command: '', draft: { ...read().draft, name: '', prompt: '' }, cursor: { ...read().cursor, command: 0, name: 0, prompt: 0 } } : {}) });
       if (result.state === 'needs_confirmation') openDecision({ kind: 'trust', root: task.project.root, message: result.message, taskId: task.id,
         proceed: async () => {
           const current = read().tasks.find(item => item.id === task.id);
@@ -211,8 +225,8 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       cancelNotices(task.id, task.attemptId);
       // No fabricated success or identity when the transport violates its seam.
       updateTask(task.id, item => ({ ...item, launch: { ...item.launch, state: 'uncertain', message: 'Launch response unavailable. Inspect Herdr before another launch.' } }));
-      change({ busy: null, dispatchHold: true });
-      inform(`${error.message || 'Launch outcome unavailable.'} Check Herdr before another launch; your prompt is preserved.`, 'warning');
+      change({ busy: null, view: 'board', boardView: 'tasks', query: '', filter: 'all', selectedTaskId: `task:${task.id}` });
+      inform(`Needs you · ${error.message || 'Launch outcome unavailable.'} Check Herdr; your prompt is preserved.`, 'warning');
     }
   }
   async function decide(approved) {
@@ -268,6 +282,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       const status = ['working', 'blocked', 'done', 'idle', 'unknown'].includes(agent.status) ? agent.status : 'unknown';
       const updated = transition(task, { type: 'live', status, since: new Date(now()).toISOString(), paneId: task.target.paneId, terminalId: task.target.terminalId });
       if (!updated.target.sessionId && agent.sessionId) updated.target.sessionId = agent.sessionId;
+      if (['working', 'done'].includes(status)) updated.observedActivity = true;
       if (['done', 'idle'].includes(status)) void refreshSummary(updated);
       return updated;
     });
@@ -286,7 +301,28 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
           if (read().snapshot.agents.some(agent => matchesTask(task, agent))) return task;
           return transition(task, { type: 'live', status: 'closed', since: new Date(now()).toISOString(), ...task.target });
         }) });
+        scheduleClosedRows();
       }).catch(() => {}).finally(() => { topologyPending = false; });
+    }
+  }
+  function scheduleClosedRows() {
+    for (const task of read().tasks) {
+      if (task.dismissed || task.live.status !== 'closed' || closedTimers.has(task.id)) continue;
+      const identity = targetSignature(task);
+      const timer = setTimeout(async () => {
+        closedTimers.delete(task.id);
+        const current = read().tasks.find(item => item.id === task.id);
+        if (!alive || !current || current.dismissed || current.live.status !== 'closed' || targetSignature(current) !== identity) return;
+        try {
+          // Closure was already established from private topology. This only
+          // releases the in-memory reservation; it never closes a native pane.
+          const result = await controller.dismissTask({ taskId: task.id, attemptId: task.attemptId });
+          if (alive && result.ok) updateTask(task.id, item => !item.dismissed && item.live.status === 'closed' && targetSignature(item) === identity
+            ? transition(item, { type: 'dismiss', at: new Date(now()).toISOString() }) : item);
+        } catch { /* Leave the row available for explicit c/C if local dismissal fails. */ }
+      }, 5000);
+      timer.unref?.();
+      closedTimers.set(task.id, timer);
     }
   }
   const conflictingOccupant = task => read().snapshot.agents.some(agent => task.target && (agent.paneId === task.target.paneId || agent.terminalId === task.target.terminalId) && !matchesTask(task, agent));
@@ -303,10 +339,10 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     } catch { apply({ state: 'unavailable', message: 'Change summary unavailable.', at: new Date(now()).toISOString() }); }
     finally { summaryPending.delete(task.id); }
   }
-  async function dismiss(rowId, allClosed = false) {
-    const candidates = read().tasks.filter(task => !task.dismissed && (allClosed ? task.live.status === 'closed' : `task:${task.id}` === rowId));
+  async function dismiss(rowId, allClearable = false) {
+    const candidates = read().tasks.filter(task => !task.dismissed && (allClearable ? task.live.status === 'closed' || task.launch.state === 'failed' : `task:${task.id}` === rowId));
     const openMessage = 'This agent is still open. Close it with x first, or keep it.';
-    if (!candidates.length) { inform(allClosed ? 'No closed tasks to clear.' : openMessage, 'warning'); return; }
+    if (!candidates.length) { inform(allClearable ? 'No failed or closed tasks to clear.' : openMessage, 'warning'); return; }
     if (candidates.some(task => task.live.status !== 'closed' && task.launch.state !== 'failed')) { inform(openMessage, 'warning'); return; }
     change({ busy: 'dismiss' });
     let cleared = 0;
@@ -330,9 +366,10 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
         if (!alive) return;
         if (!result.ok) { inform(result.message, 'warning'); return; }
         updateTask(task.id, item => transition(item, { type: 'dismiss', at: new Date(now()).toISOString() }));
+        clearTimeout(closedTimers.get(task.id)); closedTimers.delete(task.id);
         cleared += 1;
       }
-      if (cleared) { change({ view: 'board' }); inform(allClosed ? `Cleared ${cleared} closed task${cleared === 1 ? '' : 's'}.` : 'Task cleared.'); }
+      if (cleared) { change({ view: 'board' }); inform(allClearable ? `Cleared ${cleared} task${cleared === 1 ? '' : 's'}.` : 'Task cleared.'); }
     } catch (error) { inform(error.message || 'The task could not be cleared.', 'warning'); }
     finally { change({ busy: null }); }
   }
@@ -343,7 +380,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
   return { refresh, initializeProject, context, parse, submit, decide, otherFolder, projectFor, observe, dismiss, recordFollowUp,
     inspect: rowId => { const task = read().tasks.find(item => `task:${item.id}` === rowId); if (task) void refreshSummary(task); },
     getTasks: () => structuredClone(read().tasks),
-    destroy: () => { alive = false; discovery += 1; abort.abort(); cancelNotices(); consent.clear(); } };
+    destroy: () => { alive = false; discovery += 1; abort.abort(); cancelNotices(); consent.clear(); for (const timer of closedTimers.values()) clearTimeout(timer); closedTimers.clear(); } };
 }
 
 export function matchesTask(task, agent) {

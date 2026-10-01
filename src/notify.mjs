@@ -37,14 +37,18 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       const agent = occupant && matches(task.target, occupant) ? occupant : null;
       const replaced = Boolean(occupant && !agent);
       const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), identity: identity(task.target), launch: task.launch?.state,
-        launchCode: task.launch?.code ?? null, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
-      current.set(task.id, value);
+        launchCode: task.launch?.code ?? null, delivery: task.launch?.delivery, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
       const old = previous.get(task.id);
-      if (!baseline || !value.paneId || !value.terminalId || replaced) continue;
       const setup = value.launch === 'needs_input' && old?.launch !== 'needs_input';
-      const stalled = value.launch === 'uncertain' && value.launchCode === 'agent_prompt_stalled'
-        && (old?.launch !== 'uncertain' || old?.launchCode !== 'agent_prompt_stalled');
+      const uncertain = value.launch === 'uncertain' && (value.delivery === 'launch' || value.launchCode === 'agent_prompt_stalled')
+        && (old?.launch !== 'uncertain' || old?.launchCode !== value.launchCode || old?.delivery !== value.delivery);
       const sameTarget = old?.identity === value.identity;
+      // A setup/stalled outcome and its later blocked metadata describe one
+      // attention episode. Observed work or completion ends that episode.
+      value.attention = setup || uncertain || value.status === 'blocked'
+        || (sameTarget && old.attention && !(value.observed && ['working', 'done'].includes(value.status)));
+      current.set(task.id, value);
+      if (!baseline || !value.paneId || !value.terminalId || replaced) continue;
       // An idle shell may precede execution. Only a real agent's done status
       // supports first-observation completion; synthetic unknown is no evidence.
       const firstCompletion = value.launch === 'submitted' && value.observed && value.status === 'done'
@@ -53,16 +57,14 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       // the target. Its first blocked observation still needs attention.
       const firstBlocked = ['submitted', 'uncertain'].includes(value.launch) && value.observed && value.status === 'blocked'
         && (!old?.paneId || (sameTarget && !old.observed));
-      if (!setup && !stalled && !firstCompletion && !firstBlocked && !sameTarget) continue;
+      if (!setup && !uncertain && !firstCompletion && !firstBlocked && !sameTarget) continue;
       let transition, title, body = task.label, sound;
       const label = `${safeText(task.project)} · ${safeText(names.get(task.provider) ?? task.provider ?? 'Agent')}`;
-      if (setup) {
-        transition = 'setup'; title = `⚠ ${label} needs setup`; body = task.launch.message; sound = 'request';
-      } else if (stalled) {
-        transition = 'pickup'; title = `⚠ ${label} needs attention`; body = task.launch.message; sound = 'request';
-      } else if (old?.status !== 'blocked' && value.status === 'blocked'
-        && !(old?.launch === 'needs_input' && !old.observed)) {
-        transition = 'blocked'; title = `⚠ ${label} needs input`; sound = 'request';
+      if ((setup || uncertain || (old?.status !== 'blocked' && value.status === 'blocked'))
+        && !(sameTarget && old?.attention)) {
+        transition = 'attention'; title = `⚠ ${label} · Needs you`;
+        if (setup || uncertain) body = task.launch.message;
+        sound = 'request';
       } else if (firstCompletion || (sameTarget && old.observed && value.observed
         && ['working', 'unknown'].includes(old.status) && ['done', 'idle'].includes(value.status))) {
         transition = 'finished'; title = `✓ ${label} finished`; sound = 'done';

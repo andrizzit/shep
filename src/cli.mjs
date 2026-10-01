@@ -41,7 +41,8 @@ export async function createDispatchRuntime({ context, monitor, mode = 'live', c
     signal: options.signal ? AbortSignal.any([lifetime.signal, options.signal]) : lifetime.signal });
   const registry = createProjectRegistry({ getConfig, git, history: [], snapshot: () => mode === 'demo'
     ? { workspaces: [], tabs: [], panes: [], agents: [] } : controller.getControlSnapshot() });
-  controller = createController({ context, monitor, mode, getConfig, registry, git, onNotice: notice });
+  controller = createController({ context, monitor, mode, getConfig, registry, git, onNotice: notice,
+    delivery: context.env?.SHEP_TEST_DELIVERY === 'type' ? 'type' : 'auto' });
   function startNotifier() {
     notifier?.dispose();
     notifier = undefined;

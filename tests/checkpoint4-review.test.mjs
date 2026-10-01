@@ -49,7 +49,7 @@ test('checkpoint4 defers configured profiles and explicit syntax, while unknown 
   config.agents.codex = { args: [], profiles: { fast: { args: [] }, md: { args: [] } } };
   const configured = { ...context, config };
   const { model, calls } = await setup(t, { config });
-  for (const prefix of ['codex.fast', 'codex.md', 'codex.md+here', 'codex.missing@shep', 'claude.fast@missing', 'codex.md,claude', 'pi.js+wt', 'codex@shep+wt', '@shep+wt']) {
+  for (const prefix of ['codex.fast', 'codex.md', 'codex.md+here', 'codex.missing@shep', 'claude.fast@missing', 'codex.md,claude', 'pi.js+wt']) {
     const command = `/dispatch ${prefix} preserve this task`;
     assert.equal(deferredCommand(command, configured), deferredCommand(`/dispatch ${prefix}: preserve this task`, configured));
     model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
@@ -63,11 +63,18 @@ test('checkpoint4 defers configured profiles and explicit syntax, while unknown 
     assert.equal(calls.at(-1).request.provider, 'codex'); assert.equal(calls.at(-1).request.prompt, literal);
   }
   assert.equal(calls.length, 5);
+  for (const prefix of ['codex@shep+wt', '@shep+wt']) {
+    const command = `/dispatch ${prefix} preserve this task`;
+    assert.equal(deferredCommand(command, configured), null);
+    model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
+    assert.equal(calls.at(-1).request.placement.mode, 'wt'); assert.equal(calls.at(-1).request.prompt, 'preserve this task');
+  }
+  assert.equal(calls.length, 7);
 });
 
 test('checkpoint4 preserves strict colon refusals and literal text after a valid colon prefix', async t => {
   const { model, calls } = await setup(t);
-  for (const prefix of ['codex.md', 'claude.fast', 'codex,claude', 'codex+wt']) {
+  for (const prefix of ['codex.md', 'claude.fast', 'codex,claude']) {
     const command = `/dispatch ${prefix}: task`;
     assert.match(deferredCommand(command, context), /not enabled|deferred/);
     model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
@@ -76,6 +83,8 @@ test('checkpoint4 preserves strict colon refusals and literal text after a valid
   const literal = ' codex.md, claude.fast@shep and pi.js+wt\n$(literal)';
   model.action('cancel'); model.paste('/dispatch claude: ' + literal); model.key('', { return: true }); await tick();
   assert.equal(calls.length, 1); assert.equal(calls[0].request.provider, 'claude'); assert.equal(calls[0].request.prompt, literal);
+  model.paste('/dispatch codex+wt: task'); model.key('', { return: true }); await tick();
+  assert.equal(calls.length, 2); assert.equal(calls[1].request.placement.mode, 'wt'); assert.equal(calls[1].request.prompt, 'task');
 });
 
 test('checkpoint4 undetected retained panes have actionable Herdr guidance without widening x or clearing open panes', async t => {

@@ -49,7 +49,8 @@ export function transition(task, event) {
     assertContract(validateOutcome(outcome));
     if (outcome.taskId !== task.id || outcome.attemptId !== task.attemptId) fail('Outcome belongs to a different task attempt.');
     launchState(task, outcome.state);
-    updated.launch = { state: outcome.state, message: outcome.message, code: outcome.code ?? null, stage: outcome.stage ?? task.launch.stage };
+    updated.launch = { state: outcome.state, message: outcome.message, code: outcome.code ?? null, stage: outcome.stage ?? task.launch.stage,
+      ...(outcome.delivery ? { delivery: outcome.delivery } : {}) };
     if (outcome.placement) updated.placement = copy(outcome.placement);
     if (outcome.created) updated.created = copy(outcome.created);
     if (outcome.paneId && outcome.terminalId) updated.target = { paneId: outcome.paneId, terminalId: outcome.terminalId, provider: task.agent.provider, agentName: outcome.agentName ?? task.name };

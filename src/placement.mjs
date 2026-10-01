@@ -30,16 +30,12 @@ export function resolvePlacement({ intent, project, snapshot, reservations = [] 
   if (!project || intent.projectKey !== project.key || intent.root !== project.root) failure('changed_project', 'The project identity changed. Refresh and select it again.');
   const linked = (project.worktrees ?? []).map(w => w.path);
   const main = cwd => isWithin(project.root, cwd) && !linked.some(path => isWithin(path, cwd));
-  const busy = (snapshot.agents ?? []).find(a => ['working', 'blocked'].includes(a.agent_status) && main(a.canonical_cwd));
-  const reserved = reservations.find(r => r.projectKey === project.key && main(r.cwd));
   let mode, reason;
-  if (intent.mode === 'wt') { mode = 'worktree'; reason = 'Worktree requested'; }
+  if (project.isolation === 'always') { mode = 'worktree'; reason = 'Project always uses worktrees'; }
+  else if (intent.mode === 'wt') { mode = 'worktree'; reason = 'Worktree requested'; }
   else if (intent.mode === 'here') { mode = 'here'; reason = 'Main checkout requested'; }
-  else if (project.isolation === 'always') { mode = 'worktree'; reason = 'Project always uses worktrees'; }
   else if (project.isolation === 'never') { mode = 'here'; reason = 'Project isolation is disabled'; }
-  else if (project.kind === 'git' && (busy || reserved)) {
-    mode = 'worktree'; reason = busy ? `Auto → worktree: ${busy.agent || 'an agent'} is ${busy.agent_status} in ${project.name}` : 'Auto → worktree: another launch reserved this checkout';
-  } else { mode = 'here'; reason = 'Auto → here: checkout is available'; }
+  else { mode = 'here'; reason = 'Main checkout by default'; }
   if (mode === 'worktree') {
     if (project.kind !== 'git') failure('worktree_needs_git', MESSAGES.worktreeNeedsGit.replace('{project}', project.name));
     return { targetKind: 'worktree', mode, reason, sourceRoot: project.root, cwd: null,

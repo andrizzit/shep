@@ -49,12 +49,14 @@ test('modern command sends literal task plus original input and project intent; 
 
 test('checkpoint gates only deferred syntax and keeps its draft without a task', async t => {
   const { model, calls } = await setup(); t.after(model.destroy);
-  for (const command of ['/test codex: task', '/dispatch codex.fast: task', '/dispatch codex,claude: task', '/dispatch codex+wt: task']) {
+  for (const command of ['/test codex: task', '/dispatch codex.fast: task', '/dispatch codex,claude: task']) {
     model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
     assert.match(model.getSnapshot().notice.message, /checkpoint|not enabled/);
     assert.equal(model.getSnapshot().command, command);
   }
   assert.equal(calls.length, 0); assert.equal(model.getTasks().length, 0);
+  model.action('cancel'); model.paste('/dispatch codex+wt: task'); model.key('', { return: true }); await tick();
+  assert.equal(calls.length, 1); assert.equal(calls[0].placement.mode, 'wt'); assert.equal(calls[0].prompt, 'task');
   assert.equal(deferredCommand('/dispatch codex: use +wt, .fast and /test'), null);
 });
 
@@ -243,7 +245,7 @@ test('summaries use actual target cwd, throttle ten seconds and reject reused ag
   assert.equal(model.getTasks()[0].summary.changedFiles, 2);
 });
 
-test('stalled prompt warning survives live Idle, summary and focus while preserving draft and retry hold', async t => {
+test('stalled prompt warning survives live Idle, summary and focus while preserving draft without a launch hold', async t => {
   for (const source of ['command', 'compose']) {
     const requests = [], focused = []; let closed = 0;
     const message = 'Prompt not picked up. Check the pane.';
@@ -265,9 +267,9 @@ test('stalled prompt warning survives live Idle, summary and focus while preserv
     const before = model.getSnapshot();
     const submit = () => source === 'command' ? model.key('', { return: true }) : model.key('s', { ctrl: true });
     submit(); await tick();
-    assert.equal(model.getSnapshot().view, source);
+    assert.equal(model.getSnapshot().view, 'board');
     assert.equal(requests[0].prompt, prompt);
-    assert.match(model.getSnapshot().notice.message, /^Prompt not picked up\. Check the pane\./);
+    assert.match(model.getSnapshot().notice.message, /^Needs you · Prompt not picked up\. Check the pane\./);
     assert.equal(model.getTasks()[0].launch.code, 'agent_prompt_stalled');
 
     const agent = { id: 'terminal7', terminalId: 'terminal7', paneId: 'w1:p7', provider: 'codex', name: requests[0].name,
@@ -276,24 +278,27 @@ test('stalled prompt warning survives live Idle, summary and focus while preserv
     assert.equal(model.getTasks()[0].live.status, 'idle');
     assert.equal(model.getTasks()[0].launch.state, 'uncertain');
     assert.deepEqual(model.getTasks()[0].summary, summary);
-    submit(); await tick(); assert.equal(requests.length, 1, 'Enter/Ctrl+S must not resend a stalled prompt');
+    if (source === 'compose') { submit(); await tick(); }
+    assert.equal(requests.length, 1, 'Returning to the board must not resend a stalled prompt');
     model.action('focus-result'); await tick();
     assert.equal(focused.length, 1); assert.deepEqual(focused[0], agent);
     assert.equal(model.getSnapshot().notice.message, 'Focused.', 'Focus replaces the transient launch warning');
-    assert.equal(model.getSnapshot().dispatchHold, true);
+    assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
     assert.deepEqual(model.getSnapshot().draft, { ...before.draft, prompt });
     assert.equal(model.getSnapshot().command, before.command);
 
     model.key('', { escape: true });
     // Below the split-panel threshold, only the task row can expose the warning.
     const board = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 87, height: 30 }));
-    assert.match(board, /Idle/);
+    assert.match(board, /Needs you/);
     assert(board.includes(message), 'The row warning must remain visible instead of the Git summary');
     const compact = renderToString(React.createElement(TuiView, { state: model.getSnapshot(), model, width: 39, height: 14, offset: 1 }));
-    assert.match(compact, /Idle/); assert.match(compact, /Prompt not picked up\./);
+    assert.match(compact, /Needs you/); assert.match(compact, /Prompt not picked up\./);
     assert(readCompactDetail(model).includes('Launch: uncertain · ' + message));
     assert.equal(requests.length, 1); assert.equal(closed, 0);
-    assert.equal(model.getSnapshot().dispatchHold, true);
+    assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
+    model.action('cancel'); model.paste('/dispatch A separate task'); model.key('', { return: true }); await tick();
+    assert.equal(requests.length, 2, 'A separate launch needs no manual allowance');
   }
 });
 
@@ -429,25 +434,28 @@ test('+here reaches placement despite a busy checkout, preserves literal text, a
   assert.equal(requests[1].provider, 'codex'); assert.equal(requests[1].placement.mode, 'here');
   assert.equal(requests[1].placement.subfolder, ''); assert.equal(plans[1].cwd, project.root);
   model.paste('/dispatch ordinary default'); model.key('', { return: true }); await tick();
-  assert.equal(requests[2].placement.mode, 'auto'); assert.equal(plans[2].mode, 'worktree');
+  assert.equal(requests[2].placement.mode, 'auto'); assert.equal(plans[2].mode, 'here');
 });
 
-test('+here completion exposes no deferred mode or agent workflows', async t => {
+test('+here and +wt completion exposes no deferred agent workflows', async t => {
   const context = { providers: [{ id: 'codex', name: 'Codex', available: true }], projects: [project], config: DEFAULT_CONFIG };
   for (const command of ['/dispatch codex+', '/dispatch codex@sh+h', '/dispatch @sh+']) {
     const suggestions = commandSuggestions(command, command.length, context);
-    assert.deepEqual(suggestions.map(item => item.value), ['here']);
+    assert.deepEqual(suggestions.map(item => item.value), command.endsWith('+h') ? ['here'] : ['wt', 'here']);
   }
-  for (const command of ['/dispatch codex+wt', '/dispatch codex.fast+', '/dispatch codex,claude+']) {
+  assert.deepEqual(commandSuggestions('/dispatch codex+wt', 17, context).map(item => item.value), ['wt']);
+  for (const command of ['/dispatch codex.fast+', '/dispatch codex,claude+']) {
     assert.deepEqual(commandSuggestions(command, command.length, context), []);
   }
   const { model, calls } = await setup(); t.after(model.destroy);
-  for (const command of ['/dispatch codex.fast+here: task', '/dispatch codex,claude+here: task', '/test codex+here: task', '/dispatch codex@sh+wt: task']) {
+  for (const command of ['/dispatch codex.fast+here: task', '/dispatch codex,claude+here: task', '/test codex+here: task']) {
     model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
     assert.match(model.getSnapshot().notice.message, /checkpoint|not enabled/);
     assert.equal(model.getSnapshot().command, command);
   }
   assert.equal(calls.length, 0); assert.equal(model.getTasks().length, 0);
+  model.action('cancel'); model.paste('/dispatch codex@sh+wt: task'); model.key('', { return: true }); await tick();
+  assert.equal(calls.length, 1); assert.equal(calls[0].placement.mode, 'wt'); assert.equal(calls[0].prompt, 'task');
 });
 
 // Read each content row through the real keyboard-scrollable detail at the

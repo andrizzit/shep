@@ -26,7 +26,7 @@ test('notifier uses startup baseline, transitions, focused suppression and 30s d
 });
 test('startup setup, disabled notifications/sounds and external opt-in remain explicit', () => {
   const f = fixture({ sound: false }); f.task.launch = { state: 'needs_input', message: 'Review setup' }; f.tick();
-  assert.equal(f.calls[0].sound, 'none'); assert.match(f.calls[0].title, /needs setup/);
+  assert.equal(f.calls[0].sound, 'none'); assert.match(f.calls[0].title, /Needs you/);
   f.config.notifications.enabled = false; f.snapshot.agents[0].status = 'blocked'; f.tick(); assert.equal(f.calls.length, 1);
   const g = fixture(); const external = { paneId: 'other', terminalId: 'other', provider: 'claude', name: 'External', status: 'working', workspace: { name: 'Elsewhere' } };
   g.snapshot.agents.push(external); g.tick(); external.status = 'done'; g.tick(); assert.equal(g.calls.length, 0);
@@ -36,7 +36,7 @@ test('startup setup, disabled notifications/sounds and external opt-in remain ex
 test('startup outcome gains its pane identity after starting and still emits one setup notice', () => {
   const f = fixture(); f.task.target = null; f.tick();
   f.task.target = { paneId: 'pane', terminalId: 'terminal' }; f.task.launch = { state: 'needs_input', message: 'Review trust in pane' };
-  f.tick(); f.tick(); assert.equal(f.calls.length, 1); assert.match(f.calls[0].title, /needs setup/);
+  f.tick(); f.tick(); assert.equal(f.calls.length, 1); assert.match(f.calls[0].title, /Needs you/);
 });
 
 test('new task binds its submitted outcome after a fast done completion between monitor polls', () => {
@@ -144,7 +144,7 @@ test('real task outcomes retain conservative notifications regardless of snapsho
     publish(snapshot); assert.equal(calls.length, expected, `${state}/${status}/snapshotFirst=${snapshotFirst}`);
     if (status === 'blocked') {
       assert.equal(calls[0].sound, 'request');
-      assert.match(calls[0].title, state === 'needs_input' ? /needs setup/ : /needs input/);
+      assert.match(calls[0].title, /Needs you/);
     }
     // The same terminal can host a replacement CLI. Its later status must not
     // be attributed to the task whose target came from the genuine outcome.
@@ -238,7 +238,7 @@ test('a stalled first prompt needs attention once even while its matching agent 
     if (metadataMissing) f.snapshot.agents = [];
     f.tick(); f.tick();
     assert.equal(f.calls.length, 1);
-    assert.match(f.calls[0].title, /needs attention/);
+    assert.match(f.calls[0].title, /Needs you/);
     assert.equal(f.calls[0].body, stalledOutcome.message);
     assert.equal(f.calls[0].sound, 'request');
     f.snapshot.agents = [f.agent];

@@ -1,9 +1,9 @@
 import { stripVTControlCharacters } from 'node:util';
 import { safeText } from './terminal.mjs';
-import { createTaskSession, taskRows, commandSuggestions, TASK_LABELS } from './tui-tasks.mjs';
+import { createTaskSession, taskRows, commandSuggestions, TASK_FILTERS } from './tui-tasks.mjs';
 import { validatePrompt } from './dispatch/contracts.mjs';
 
-export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs input', done: 'Done', idle: 'Idle', unknown: 'Unknown' });
+export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs you', done: 'Done', idle: 'Done', unknown: 'Starting' });
 export const FIELDS = ['provider', 'projectKey', 'subfolder', 'name', 'prompt', 'dispatch'];
 const priority = { blocked: 0, working: 1, done: 2, idle: 3, unknown: 4 };
 const providerNames = new Map([['claude', 'Claude'], ['codex', 'Codex'], ['grok', 'Grok'], ['kiro', 'Kiro']]);
@@ -46,7 +46,7 @@ export function visibleAgents(state) {
   const query = safeText(state.query).trim().toLocaleLowerCase();
   const order = ['claude', 'codex', 'grok', 'kiro'];
   return (state.snapshot.agents || []).filter(agent => {
-    if (state.filter !== 'all' && knownStatus(agent) !== state.filter) return false;
+    if (state.filter !== 'all' && STATUS_LABELS[knownStatus(agent)] !== STATUS_LABELS[state.filter]) return false;
     return !query || [agent.name, agent.provider, agent.paneId, agent.workspace?.name, agent.workspace?.path].join(' ').toLocaleLowerCase().includes(query);
   }).sort((a, b) => {
     const index = provider => order.includes(provider) ? order.indexOf(provider) : order.length;
@@ -107,7 +107,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     draft: { provider: '', name: '', projectKey: '', subfolder: '', prompt: '' },
     profiles: { providers: [], workspaces: [], defaultCwd: '', defaultWorkspaceId: '' },
     profilesLoading: true, profilesError: null, busy: null, notice: null,
-    confirmation: null, confirmClose: false, dispatchHold: false, resultTarget: null,
+    confirmation: null, confirmClose: false, resultTarget: null,
     followUp: { target: null, text: '', cursor: 0, drafts: {}, returnView: 'board' },
     tasks: [], projects: [], trustRequired: [], projectsLoading: true, projectsError: null, projectWarnings: [],
     decision: null, requiredNotice: null, detailOffset: 0, projectQuery: '', pickerIndex: 0, folderPath: '', folderLoading: false,
@@ -155,7 +155,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     } catch (error) { if (generation === catalogGeneration) change({ profilesLoading: false, profilesError: safeText(error.message || 'Unable to read launch settings.') }); }
   }
   async function run(kind, target, partial = false) {
-    const blocked = partial ? controlBlock(state) || (target?.paneId === state.profiles.ownPaneId ? 'Shep cannot focus its own pane.' : null) : targetBlock(target, kind === 'closeAgent');
+    const blocked = partial ? controlBlock(state) || (target?.paneId === state.profiles.ownPaneId || target?.terminalId && target.terminalId === state.profiles.ownTerminalId ? 'Shep cannot focus its own pane.' : null) : targetBlock(target, kind === 'closeAgent');
     if (blocked) { inform(blocked, 'warning'); return; }
     change({ busy: kind, notice: { message: kind === 'focus' ? 'Focusing agent…' : 'Closing agent…', kind: 'info' } });
     try {
@@ -166,7 +166,6 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   async function dispatch(source = 'compose') {
     const blocked = controlBlock(state);
     if (blocked) { inform(blocked, 'warning'); return; }
-    if (state.dispatchHold) { inform('Review the previous launch, then use “Allow another launch” before dispatching again.', 'warning'); return; }
     if (state.profilesLoading || state.profilesError) { inform('Launch settings are unavailable. Use Ctrl+R to refresh them.', 'warning'); return; }
     await session.submit(source);
   }
@@ -313,12 +312,14 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     if (name === 'field') { if (state.view === 'compose') { if (value === 'projectKey') action('pick-project'); else if (state.field === value && value === 'provider') cycleChoice(1); else change({ field: value }); } return; }
     if (name === 'refresh') { void monitor.refresh?.(); void refreshProfiles(); void session.refresh({ force: true }); return; }
     if (name === 'search') { change({ view: 'search', cursor: { ...state.cursor, search: graphemes(state.query).length } }); return; }
-    if (name === 'filter') { const filters = ['all', ...Object.keys(state.boardView === 'tasks' ? TASK_LABELS : STATUS_LABELS)]; change({ filter: filters[(filters.indexOf(state.filter) + 1) % filters.length] }); return; }
+    if (name === 'filter') {
+      const filters = state.boardView === 'tasks' ? TASK_FILTERS : TASK_FILTERS.filter(filter => filter === 'all' || Object.hasOwn(STATUS_LABELS, filter));
+      change({ filter: filters[(filters.indexOf(state.filter) + 1) % filters.length] }); return;
+    }
     if (name === 'new') { change({ view: 'compose', field: state.draft.prompt ? 'prompt' : 'provider', confirmation: null }); return; }
     if (name === 'cancel') { if (!state.busy) change({ view: ['picker', 'folder'].includes(state.view) ? 'compose' : 'board', confirmation: null }); return; }
     if (name === 'move') { moveSelection(value); return; }
     if (name === 'choice') { cycleChoice(value); return; }
-    if (name === 'allow-launch') { if (!state.busy) change({ dispatchHold: false, resultTarget: null, notice: { kind: 'warning', message: 'Another launch is enabled. The preserved prompt will create a new agent.' } }); return; }
     if (name === 'focus-result') {
       const target = state.snapshot.agents.find(agent => agent.paneId === state.resultTarget?.paneId && (!state.resultTarget.terminalId || agent.terminalId === state.resultTarget.terminalId));
       if (target) void run('focus', target);
@@ -327,7 +328,15 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       return;
     }
     if (name === 'dispatch') { void dispatch(); return; }
-    if (name === 'focus') { const target = selected(); void run('focus', target); return; }
+    if (name === 'focus') {
+      const target = selected();
+      const task = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
+      // The controller may know the newly created native target before the
+      // public monitor does. It still validates the exact captured identity.
+      if (!target && task?.target && task.live.status !== 'closed') void run('focus', { ...task.target, id: task.target.terminalId, name: task.name }, true);
+      else void run('focus', target);
+      return;
+    }
     if (name === 'close') {
       const target = selected();
       const blocked = targetBlock(target);
@@ -359,7 +368,6 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       else edit(input, key);
       return;
     }
-    if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'y' && state.dispatchHold) { action('allow-launch'); return; }
     if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'f' && state.resultTarget) { action('focus-result'); return; }
     if (state.view === 'decision') {
       if (key.escape || input === 'n') action('decide', false);
@@ -413,7 +421,6 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
         else if (key.return) cycleField();
       } else if (state.field === 'dispatch') {
         if (key.return || input === ' ') action('dispatch');
-        else if (input === 'a' && state.dispatchHold) action('allow-launch');
         else if (input === 'f' && state.resultTarget) action('focus-result');
       } else if (key.return && state.field !== 'prompt') cycleField();
       else edit(input, key);

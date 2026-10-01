@@ -3,7 +3,7 @@ import { access, stat } from 'node:fs/promises';
 import * as nativeFs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { DEFAULT_CONFIG, LIMITS, MESSAGES as DISPATCH_MESSAGES, validateDispatchRequest, validatePrompt } from './dispatch/contracts.mjs';
+import { DEFAULT_CONFIG, DELIVERY_POLICIES, LIMITS, MESSAGES as DISPATCH_MESSAGES, validateDispatchRequest, validatePrompt } from './dispatch/contracts.mjs';
 import { createGitRunner } from './gitinfo.mjs';
 import { normalizeControlSnapshot } from './herdr.mjs';
 import { safeText } from './terminal.mjs';
@@ -96,7 +96,8 @@ async function hasExecutable(executable, env) {
   return false;
 }
 
-export function createController({ context, monitor, mode = 'live', run, readRaw, config = DEFAULT_CONFIG, getConfig = () => config, registry, git, fs = nativeFs, now = () => new Date().toISOString(), randomHex = length => randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length), onNotice } = {}) {
+export function createController({ context, monitor, mode = 'live', delivery = 'auto', run, readRaw, config = DEFAULT_CONFIG, getConfig = () => config, registry, git, fs = nativeFs, now = () => new Date().toISOString(), randomHex = length => randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length), onNotice } = {}) {
+  if (!DELIVERY_POLICIES.includes(delivery)) throw new TypeError('Dispatch delivery must be auto or type.');
   const pinned = {
     binary: context?.binary ?? context?.env?.HERDR_BIN_PATH ?? 'herdr',
     env: { ...context?.env },
@@ -379,7 +380,7 @@ export function createController({ context, monitor, mode = 'live', run, readRaw
   const targetService = createTargetService({ abort, active, assertLive, fresh, getControlSnapshot, invoke, directionFor, locked,
     registry, gitRead, fs, pinned, trusted, reservations, receipts, operationLocks, observe, randomHex, getConfig,
     fail, ControlError, errorCode, present });
-  const launch = createLaunchRunner({ assertLive, hasExecutable, KINDS, pinned, fail, randomHex,
+  const launch = createLaunchRunner({ assertLive, hasExecutable, KINDS, pinned, fail, randomHex, delivery,
     ...targetService, observe, fresh, operationLocks, invoke, compareAgent, checkedAgent, outcome,
     reservations, errorCode, trusted, NEEDS_INPUT, UNCERTAIN, messageFor });
   const { listWorktrees, removeWorktree } = createCleanupOperations({ assertLive, directory: targetService.directory,

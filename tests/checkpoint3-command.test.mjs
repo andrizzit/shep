@@ -75,7 +75,7 @@ test('checkpoint3: suggestion hint is visible in wide and narrow terminal layout
 
 test('checkpoint3: deferred no-colon forms use the same refusals and never dispatch', async t => {
   const { model, calls } = await setup(t);
-  for (const prefix of ['claude.fast@shep', 'claude,codex@shep', 'codex@shep+wt', 'codex@unknown+wt', '@folio+wt']) {
+  for (const prefix of ['claude.fast@shep', 'claude,codex@shep']) {
     const command = `/dispatch ${prefix} literal task`;
     assert.equal(deferredCommand(command, { projects, providers }), deferredCommand(`/dispatch ${prefix}: literal task`, { projects, providers }));
     model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
@@ -83,6 +83,17 @@ test('checkpoint3: deferred no-colon forms use the same refusals and never dispa
     assert.equal(model.getSnapshot().command, command);
   }
   assert.equal(calls.length, 0); assert.equal(model.getTasks().length, 0);
+  for (const prefix of ['codex@shep+wt', '@folio+wt']) {
+    const command = `/dispatch ${prefix} literal task`;
+    assert.equal(deferredCommand(command, { projects, providers }), null);
+    model.action('cancel'); model.paste(command); model.key('', { return: true }); await tick();
+    assert.equal(calls.at(-1).placement.mode, 'wt'); assert.equal(calls.at(-1).prompt, 'literal task');
+  }
+  const unknown = '/dispatch codex@unknown+wt literal task';
+  model.paste(unknown); model.key('', { return: true }); await tick();
+  assert.equal(calls.at(-1).prompt, 'codex@unknown+wt literal task'); assert.equal(calls.at(-1).placement.mode, 'auto');
+  model.paste('/dispatch codex@unknown+wt: literal task'); model.key('', { return: true }); await tick();
+  assert.match(model.getSnapshot().notice.message, /Unknown project/); assert.equal(calls.length, 3);
   for (const text of ['foo.bar task', 'apple,pear task', '@src/app.ts fix', '@unknown+wt task', 'Claude.fast task', 'codex: use +wt and claude.fast literally']) {
     assert.equal(deferredCommand(`/dispatch ${text}`, { projects, providers }), null, text);
   }

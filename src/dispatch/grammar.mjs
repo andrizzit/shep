@@ -48,7 +48,7 @@ function resolveProject(value, ctx) {
 }
 
 function clearPrefix(token, ctx) {
-  const prefix = /^([a-z][a-z0-9]*)?(?:@([A-Za-z0-9._-]{1,64}))?(?:\+(here))?$/.exec(token);
+  const prefix = /^([a-z][a-z0-9]*)?(?:@([A-Za-z0-9._-]{1,64}))?(?:\+(here|wt))?$/.exec(token);
   if (!prefix || (!prefix[1] && !prefix[2])) return false;
   if (prefix[1] && !(ctx.providers ?? []).some(provider => provider.id === prefix[1] && provider.available)) return false;
   if (prefix[2] && !entriesFor(ctx).some(project => matches(project, prefix[2]))) return false;
