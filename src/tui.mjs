@@ -228,7 +228,8 @@ function Composer({ state, model, width, height, registry }) {
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   const narrow = height < (state.dispatchHold ? 26 : 23);
   const locationPreview = project?.kind === 'git' && Boolean(state.draft.subfolder) && !state.requiredNotice;
-  const promptRows = Math.max(2, Math.min(7, height - 12 - Number(locationPreview)));
+  const providerRows = Math.max(1, Math.min(5, height - 8 - Number(locationPreview)));
+  const promptRows = Math.max(2, Math.min(7, height - 15 - Number(locationPreview) - (state.field === 'provider' ? providerRows - 1 : 0)));
   const blocked = controlBlock(state) || state.dispatchHold || !provider?.available || state.profilesLoading;
   const title = name => ({ provider: 'Provider', name: 'Name (optional)', projectKey: 'Project', subfolder: 'Subfolder (optional)', prompt: 'Task', dispatch: 'Launch' })[name];
   const renderField = field => {
@@ -236,8 +237,26 @@ function Composer({ state, model, width, height, registry }) {
     const color = active ? C.orange : C.muted;
     if (field === 'dispatch') return h(Box, { key: field, flexDirection: 'column', flexShrink: 0 },
       h(Button, { label: state.busy === 'dispatch' ? 'Starting…' : 'Dispatch agent  Ctrl+S', registry, id: 'dispatch', active, disabled: Boolean(blocked), action: () => model.action('dispatch') }));
+    if (field === 'provider' && active) {
+      const installed = state.profiles.providers.filter(item => item.available);
+      const selected = installed.findIndex(item => item.id === state.draft.provider);
+      const capacity = providerRows;
+      const start = Math.max(0, selected - capacity + 1);
+      return h(Box, { key: field, flexDirection: 'column', flexShrink: 0 },
+        h(Box, { justifyContent: 'space-between' }, line('› Provider', { color, bold: true }),
+          line(installed.length ? `${start + 1}–${Math.min(installed.length, start + capacity)}/${installed.length}` : '0 installed', { color: C.faint })),
+        ...installed.slice(start, start + capacity).map((item, index) => h(Click, { key: item.id, registry, id: `provider-${item.id}`, height: 1, flexShrink: 0,
+          backgroundColor: start + index === selected ? C.selected : C.panel, action: () => {
+            const current = model.getSnapshot();
+            if (current.view !== 'compose' || current.field !== 'provider') return;
+            const choices = current.profiles.providers.filter(item => item.available);
+            const next = choices.findIndex(choice => choice.id === item.id);
+            if (next >= 0) model.action('choice', next - choices.findIndex(choice => choice.id === current.draft.provider));
+          } }, line(`${start + index === selected ? '›' : ' '} ${item.name}`, { color: start + index === selected ? C.orange : C.ink }))),
+        !installed.length && line(state.profilesLoading ? 'Loading agents…' : 'No installed agents.', { color: C.faint }));
+    }
     let value;
-    if (field === 'provider') value = `${provider?.name || 'Loading…'}${provider && !provider.available ? ' · unavailable' : ''}  ‹ ›`;
+    if (field === 'provider') value = `${provider?.name || 'Loading…'}${provider && !provider.available ? ' · unavailable' : ''}`;
     else if (field === 'projectKey') value = `${project?.name || (state.projectsLoading ? 'Projects loading…' : 'Choose a project')}  Enter / click`;
     else value = state.draft[field];
     const fieldHeight = field === 'prompt' ? narrow ? Math.max(1, height - (state.dispatchHold ? 12 : 9) - Number(locationPreview)) : promptRows : 1;
@@ -260,8 +279,8 @@ function Composer({ state, model, width, height, registry }) {
       h(Button, { label: 'Next ›', registry, id: 'field-next', action: () => model.action('field-next', 1) }),
       h(Button, { label: 'Back', registry, id: 'compose-back', action: () => model.action('cancel') })),
     h(Box, { flexGrow: 1 }),
-    state.field === 'provider' && provider?.reason ? line(provider.reason, { color: provider.available ? C.faint : C.working }) :
-      line(state.field === 'subfolder' ? 'Automatic isolation; worktrees start at root.' : state.field === 'projectKey' ? (project?.root || 'Choose Project or Other folder…') : state.field === 'name' ? 'Name: a-z then a-z, 0-9, _ or -; max 32.' : state.field === 'prompt' ? `${Buffer.byteLength(state.draft.prompt)} / 65536 prompt bytes · paste supported` : controlBlock(state) || '←/→ choose · Tab next · Esc keeps draft', { color: C.faint }));
+    !(narrow && state.field === 'provider' && height < 9 + Number(locationPreview)) && (state.field === 'provider' && provider?.reason ? line(provider.reason, { color: provider.available ? C.faint : C.working }) :
+      line(state.field === 'provider' ? '↑↓ / ←→ choose · Enter/Tab next' : state.field === 'subfolder' ? 'Automatic isolation; worktrees start at root.' : state.field === 'projectKey' ? (project?.root || 'Choose Project or Other folder…') : state.field === 'name' ? 'Name: a-z then a-z, 0-9, _ or -; max 32.' : state.field === 'prompt' ? `${Buffer.byteLength(state.draft.prompt)} / 65536 prompt bytes · paste supported` : controlBlock(state) || '←/→ choose · Tab next · Esc keeps draft', { color: C.faint })));
 }
 function Confirmation({ state, model, width, height, registry }) {
   const target = state.confirmation;
@@ -347,18 +366,15 @@ function NoticeDetail({ state, model, width, height, registry }) {
       h(Button, { label: 'Back Esc', registry, id: 'notice-back', action: () => model.action('cancel') })));
 }
 
-function Suggestions({ state, model, width, registry }) {
+function Suggestions({ state, model, width, rows, registry }) {
   const candidates = state.suggestions || [];
-  const hint = line('↑↓ choose · Tab/Enter accept', { color: C.faint });
-  if (width < 70) {
-    const item = candidates[state.suggestionIndex];
-    return h(Box, { height: 2, flexShrink: 0, flexDirection: 'column' }, h(Box, { height: 1, flexShrink: 0 },
-      h(Button, { label: 'Next', registry, id: 'suggest-next', action: () => model.action('suggest-next') }),
-      h(Click, { registry, id: 'suggest-current', action: () => model.action('suggestion', state.suggestionIndex), flexGrow: 1, minWidth: 0, backgroundColor: C.selected }, line(`Tab ${item?.label || ''}`, { color: C.orange }))), hint);
-  }
-  const cell = Math.max(5, Math.floor(width / Math.max(1, candidates.length)) - 2);
-  return h(Box, { height: 2, flexShrink: 0, flexDirection: 'column' }, h(Box, { height: 1, flexShrink: 0 }, ...candidates.map((item, index) =>
-    h(Button, { key: index, label: truncate(item.label, cell), active: index === state.suggestionIndex, registry, id: `suggest-${index}`, action: () => model.action('suggestion', index) }))), hint);
+  const start = Math.max(0, state.suggestionIndex - rows + 1);
+  return h(Box, { width, height: rows + 1, flexShrink: 0, flexDirection: 'column', backgroundColor: C.panel },
+    ...candidates.slice(start, start + rows).map((item, index) => h(Click, { key: start + index, registry, id: `suggest-${start + index}`,
+      action: () => model.action('suggestion', start + index), height: 1, flexShrink: 0, paddingX: 1,
+      backgroundColor: start + index === state.suggestionIndex ? C.selected : C.panel },
+      line(`${start + index === state.suggestionIndex ? '›' : ' '} ${item.label}`, { color: start + index === state.suggestionIndex ? C.orange : C.ink }))),
+    line('↑↓ choose · Tab/Enter accept', { color: C.faint }));
 }
 
 export function noticeLines(state, width) {
@@ -391,7 +407,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up'].includes(state.view) ? 0 : 3;
   const footerHeight = short ? 1 : 2;
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : state.dispatchHold ? 3 : 2;
-  const suggestionHeight = state.view === 'command' && state.suggestions.length ? 2 : 0;
+  const suggestionRows = state.view === 'command' && state.suggestions.length ? Math.max(1, Math.min(5, state.suggestions.length, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - 5)) : 0;
+  const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
   const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
   const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
   const listWidth = split ? Math.floor(width * .52) : width;
@@ -431,12 +448,12 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         h(Click, { registry, id: 'command', action: () => model.action('command'), flexGrow: 1, minWidth: 0, backgroundColor: state.view === 'command' ? C.selected : C.panel }, line(`› ${commandDisplay}`, { color: state.view === 'command' ? C.ink : C.orange })),
         state.view === 'command' && width >= 70 && h(Button, { label: '↑', registry, id: 'recall-prev', action: () => model.action('command-recall', -1) }),
         state.view === 'command' && width >= 70 && h(Button, { label: '↓', registry, id: 'recall-next', action: () => model.action('command-recall', 1) }))),
+    suggestionHeight > 0 && h(Suggestions, { state, model, width, rows: suggestionRows, registry }),
     h(Box, { height: bodyHeight, flexShrink: 0 },
-      split ? h(React.Fragment, null,
+      suggestionHeight > 0 && bodyHeight < 5 ? null : split ? h(React.Fragment, null,
         h(List, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
         ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
-    suggestionHeight > 0 && h(Suggestions, { state, model, width, registry }),
     state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
       h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4))),
       state.dispatchHold && h(Box, { gap: 1, flexShrink: 0 },
