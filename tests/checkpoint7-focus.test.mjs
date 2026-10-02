@@ -7,7 +7,7 @@ import { createController } from '../src/control.mjs';
 import { getHerdrContext } from '../src/herdr.mjs';
 import { makeProject, makeSnapshot, createFakeRegistry, deferred } from './helpers/dispatch-fakes.mjs';
 
-async function fixture(t, { detected = false, split = false, progress, beforeFocus } = {}) {
+async function fixture(t, { detected = false, split = false, progress, beforeFocus, beforeGet } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'shep-start-focus-'))), bin = join(root, 'bin');
   await fs.mkdir(bin); await fs.writeFile(join(bin, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   const project = makeProject({ root, kind: 'folder', commonDir: null, key: `dir:${root}` });
@@ -30,7 +30,10 @@ async function fixture(t, { detected = false, split = false, progress, beforeFoc
       if (!snapshot.agents.length) snapshot.agents.push(agent);
       return { result: { agent: structuredClone(agent), argv: ['codex', argv.at(-1)] } };
     }
-    if (argv[1] === 'get') return { result: { agent: structuredClone(snapshot.agents.find(agent => agent.pane_id === argv[2])) } };
+    if (argv[1] === 'get') {
+      await beforeGet?.();
+      return { result: { agent: structuredClone(snapshot.agents.find(agent => agent.pane_id === argv[2])) } };
+    }
     if (argv[1] === 'focus') {
       if (await beforeFocus?.(argv, snapshot) === false) return { result: {} };
       const selected = argv[0] === 'tab' ? snapshot.panes.find(pane => pane.tab_id === argv[2])?.pane_id : argv[2];
@@ -132,4 +135,19 @@ test('disposal during early-tab focus sends no further commands or retries', asy
   f.release.resolve(); assert.equal((await f.pending).code, 'disposed');
   assert.equal(f.calls.length, count); assert.equal(focusCalls(f).length, 1);
   assert.equal(f.calls.filter(argv => ['prompt', 'close', 'remove'].includes(argv[1])).length, 0);
+});
+
+test('focus remains available during launch postflight while close and follow-up stay locked', async t => {
+  const checking = deferred(), checked = deferred(); let reads = 0;
+  const f = await fixture(t, { beforeGet: async () => { if (++reads === 1) { checking.resolve(); await checked.promise; } } });
+  f.release.resolve(); await checking.promise;
+  try {
+    assert.equal((await f.controller.focus(f.target)).state, 'focused');
+    assert.deepEqual(focusCalls(f), [['agent', 'focus', 'w1:p2']]);
+    assert.equal((await f.controller.closeAgent({ ...f.target, status: 'working' })).code, 'busy');
+    assert.equal((await f.controller.followUp({ target: f.target, text: 'Never send this' })).code, 'busy');
+    assert.equal(f.calls.filter(argv => argv[1] === 'start').length, 1);
+    assert.equal(f.calls.filter(argv => ['prompt', 'close', 'remove'].includes(argv[1])).length, 0);
+  } finally { checked.resolve(); }
+  assert.equal((await f.pending).state, 'submitted');
 });

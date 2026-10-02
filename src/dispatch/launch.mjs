@@ -47,7 +47,6 @@ export function createLaunchRunner(deps) {
         await observe(job, 'start', { target: { ...earlyTarget }, delivery: atLaunch ? 'launch' : 'type' });
         const start = await invoke(['agent', 'start', name, '--kind', request.provider, '--pane', pane.pane_id, '--timeout', '30000',
           ...(atLaunch || request.args?.length ? ['--', ...(request.args ?? []), ...(atLaunch ? [request.prompt] : [])] : [])], { timeoutMs: LIMITS.startTransportTimeoutMs });
-        delete startLock.startupTarget; delete startLock.taskKey;
         const target = { paneId: pane.pane_id, terminalId: pane.terminal_id, provider: request.provider, agentName: name,
           ...(start.result?.agent?.agent_session?.kind === 'id' ? { sessionId: start.result.agent.agent_session.value } : {}) };
         compareAgent(target, start.result?.agent);
@@ -63,6 +62,9 @@ export function createLaunchRunner(deps) {
           return finish(outcome('needs_input', 'The new pane needs attention before receiving a prompt. Review its trust, authentication or approval screen; the prompt was not sent.', { ...details(), code: 'agent_not_ready' }));
         }
         if (!['idle', 'done'].includes(current.agent.agent_status)) return finish(outcome('uncertain', 'The new agent is not ready for a prompt. Inspect the preserved pane before sending work.', { ...details(), code: 'agent_not_ready' }));
+        // Focus stays available through startup's read-only identity checks.
+        // The typed prompt stage keeps its existing exclusive pane lock.
+        delete startLock.startupTarget; delete startLock.taskKey;
         await observe(job, 'prompt');
         const submitted = await invoke(['agent', 'prompt', pane.pane_id, request.prompt,
           '--wait', '--until', 'working', '--timeout', String(PROMPT_ACTIVITY_TIMEOUT_MS)], { timeoutMs: LIMITS.followUpTimeoutMs });
