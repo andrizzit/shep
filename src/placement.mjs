@@ -26,7 +26,7 @@ export async function preparePlacementSnapshot(snapshot, { realpath = nativeReal
   return { ...snapshot, panes, agents, workspaces };
 }
 
-export function resolvePlacement({ intent, project, snapshot, reservations = [] }) {
+export function resolvePlacement({ intent, project, snapshot }) {
   if (!project || intent.projectKey !== project.key || intent.root !== project.root) failure('changed_project', 'The project identity changed. Refresh and select it again.');
   const linked = (project.worktrees ?? []).map(w => w.path);
   const main = cwd => isWithin(project.root, cwd) && !linked.some(path => isWithin(path, cwd));

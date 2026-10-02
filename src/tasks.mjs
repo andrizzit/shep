@@ -44,16 +44,29 @@ export function transition(task, event) {
     if (next < current || (task.launch.state === 'starting' && progress.stage === 'queued' && !confirmedQueue)) fail('Launch progress cannot move backwards.');
     if (progress.stage !== 'queued' && task.launch.state === 'queued') launchState(task, 'starting');
     updated.launch = { ...task.launch, state: progress.stage === 'queued' ? task.launch.state : 'starting', stage: progress.stage, message: progress.message ?? (progress.stage === 'queued' ? 'Queued for launch.' : 'Starting agent…') };
+    if (progress.target) {
+      if (progress.target.provider !== task.agent.provider || progress.target.agentName !== task.name
+        || (task.target && ['paneId', 'terminalId', 'provider', 'agentName'].some(key => task.target[key] !== progress.target[key]))) fail('Startup target does not match this task.');
+      updated.target = { paneId: progress.target.paneId, terminalId: progress.target.terminalId, provider: progress.target.provider,
+        agentName: progress.target.agentName, ...(task.target?.sessionId ? { sessionId: task.target.sessionId } : {}) };
+    }
+    if (progress.delivery) updated.launch.delivery = progress.delivery;
   } else if (event.type === 'outcome') {
     const outcome = event.outcome;
     assertContract(validateOutcome(outcome));
     if (outcome.taskId !== task.id || outcome.attemptId !== task.attemptId) fail('Outcome belongs to a different task attempt.');
     launchState(task, outcome.state);
+    if (outcome.delivery && task.launch.delivery && outcome.delivery !== task.launch.delivery) fail('Outcome delivery does not match startup.');
+    const delivery = outcome.delivery ?? task.launch.delivery;
     updated.launch = { state: outcome.state, message: outcome.message, code: outcome.code ?? null, stage: outcome.stage ?? task.launch.stage,
-      ...(outcome.delivery ? { delivery: outcome.delivery } : {}) };
+      ...(delivery ? { delivery } : {}) };
     if (outcome.placement) updated.placement = copy(outcome.placement);
     if (outcome.created) updated.created = copy(outcome.created);
-    if (outcome.paneId && outcome.terminalId) updated.target = { paneId: outcome.paneId, terminalId: outcome.terminalId, provider: task.agent.provider, agentName: outcome.agentName ?? task.name };
+    if (outcome.paneId && outcome.terminalId) {
+      const target = { paneId: outcome.paneId, terminalId: outcome.terminalId, provider: task.agent.provider, agentName: outcome.agentName ?? task.name };
+      if (task.target && ['paneId', 'terminalId', 'provider', 'agentName'].some(key => task.target[key] !== target[key])) fail('Outcome target does not match startup.');
+      updated.target = { ...target, ...(task.target?.sessionId ? { sessionId: task.target.sessionId } : {}) };
+    }
   } else if (event.type === 'confirmation') {
     if (task.launch.state !== 'needs_confirmation' || typeof event.approved !== 'boolean' || !instant(event.at)) fail('No trust confirmation is pending for this task.');
     const state = event.approved ? 'starting' : 'failed';

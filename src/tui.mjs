@@ -1,7 +1,8 @@
 import React, { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { basename, isAbsolute, relative } from 'node:path';
 import { render, Box, Text, useInput, usePaste, useWindowSize, measureElement } from 'ink';
-import { createTuiModel, visibleAgents, knownStatus, STATUS_LABELS, providerName, FIELDS, graphemes, parseMouse, hitTest, controlBlock } from './tui-model.mjs';
-import { taskGroups, taskRows, TASK_LABELS, taskPresentation, displayArgs, summaryLabel } from './tui-tasks.mjs';
+import { createTuiModel, visibleAgents, knownStatus, agentPresentation, STATUS_LABELS, providerName, FIELDS, graphemes, parseMouse, hitTest, controlBlock } from './tui-model.mjs';
+import { taskGroups, taskRows, TASK_LABELS, taskPresentation, matchesTask, displayArgs, summaryLabel } from './tui-tasks.mjs';
 import { safeText, displayWidth } from './terminal.mjs';
 
 export const TUI_COLORS = Object.freeze({ canvas: '#111b19', panel: '#172420', selected: '#293f34', border: '#465c4e', ink: '#eef2e8', muted: '#acb9ac', faint: '#829889', orange: '#f09365', working: '#e5c86e', blocked: '#f18b89', done: '#7fd3c7', idle: '#93cd95', unknown: '#a2aaa5' });
@@ -51,6 +52,57 @@ function health(state) {
   if (state.snapshot.source.state === 'connected') return { label: 'LIVE', color: C.idle };
   return { label: state.snapshot.updatedAt ? 'STALE · actions disabled' : 'CONNECTING', color: C.blocked };
 }
+const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000 ? '<1m' : milliseconds < 3600000 ? `${Math.floor(milliseconds / 60000)}m` : `${Math.floor(milliseconds / 3600000)}h`;
+const taskColor = status => TASK_LABELS[status] === 'Needs you' || status === 'failed' ? C.blocked : status === 'working' ? C.working : C.muted;
+const attention = row => TASK_LABELS[taskPresentation(row)] === 'Needs you';
+function agentRow(state, agent) {
+  const task = state.tasks.find(item => !item.dismissed && matchesTask(item, agent));
+  const path = agent.workspace?.path;
+  const project = task?.project || state.projects.find(item => path === item.root || path?.startsWith(item.root + '/') || item.worktrees?.some(tree => path === tree.path || path?.startsWith(tree.path + '/')));
+  return { agent, task, project, status: agentPresentation(state, agent), elapsedMs: task ? Math.max(0, Date.now() - Date.parse(task.at)) : null };
+}
+function rowName(row) {
+  const agent = row.agent;
+  const unnamed = agent && (Object.hasOwn(agent, 'agentName') ? !agent.agentName : !agent.name);
+  return { name: safeText(row.task?.name || (!unnamed && agent?.name) || providerName(agent?.provider)),
+    pane: !row.task && unnamed ? safeText(agent.paneId || '') : '' };
+}
+function rowFolder(row) {
+  const path = row.task?.placement?.cwd || row.agent?.workspace?.path;
+  const root = row.project?.root;
+  if (!path || path === root) return '';
+  const folder = root ? relative(root, path) : '';
+  return safeText(folder && !folder.startsWith('..') && !isAbsolute(folder) ? folder : basename(path));
+}
+function rowSupplement(row) {
+  if (attention(row)) return ['needs_input', 'uncertain', 'needs_confirmation'].includes(row.task?.launch.state)
+    ? row.task.launch.message : 'Check the agent pane · Enter to open';
+  return TASK_LABELS[taskPresentation(row)] === 'Done' && row.task?.summary ? summaryLabel(row.task.summary) : '';
+}
+function Badge({ status }) {
+  const label = TASK_LABELS[status] || 'Starting';
+  const text = label === 'Needs you' ? '! Needs you' : label;
+  return h(Box, { width: displayWidth(text), height: 1, flexShrink: 0 }, h(Text, { wrap: 'truncate-end',
+    color: label === 'Needs you' ? C.canvas : taskColor(status), backgroundColor: label === 'Needs you' ? C.blocked : undefined,
+    bold: label === 'Needs you' || status === 'working' }, text));
+}
+function NamedRow({ row, active, width }) {
+  const status = taskPresentation(row), { name, pane } = rowName(row);
+  const provider = truncate(providerName(row.task?.agent.provider || row.agent?.provider), width < 50 ? 6 : 12);
+  const detail = rowFolder(row) || elapsed(row.elapsedMs);
+  const badge = TASK_LABELS[status] === 'Needs you' ? '! Needs you' : TASK_LABELS[status] || 'Starting';
+  const metaWidth = Math.min(22, Math.floor(width / 4), width - 3 - displayWidth(badge) - displayWidth(provider) - 3 - 8);
+  const metadata = detail && metaWidth >= 4 ? truncate(detail, metaWidth) : '';
+  const nameWidth = Math.max(3, width - 3 - displayWidth(badge) - displayWidth(provider) - 2 - (metadata ? displayWidth(metadata) + 1 : 0));
+  const shownName = truncate(name, nameWidth);
+  const paneWidth = Math.max(0, nameWidth - displayWidth(shownName) - 1);
+  return h(Box, { width, height: 1, flexShrink: 0 },
+    line(`${attention(row) ? '▌' : active ? '›' : status === 'working' ? '●' : '○'}${attention(row) && active ? '›' : ' '} `, { color: taskColor(status), bold: attention(row) }),
+    h(Box, { width: nameWidth, flexShrink: 0 }, h(Text, { wrap: 'truncate-end' }, h(Text, { color: C.ink, bold: true }, shownName),
+      pane && paneWidth > 0 ? h(Text, { color: C.faint }, ' ' + truncate(pane, paneWidth)) : null)),
+    line(' '), h(Badge, { status }), line(' ' + provider, { color: C.faint }),
+    metadata && line(' ' + metadata, { color: C.faint }));
+}
 export function listRows(state) {
   const agents = visibleAgents(state);
   const defaults = ['claude', 'codex', 'grok', 'kiro'];
@@ -64,8 +116,9 @@ export function listRows(state) {
     rows.push({ type: 'provider', provider, count: group.length });
     if (!group.length) rows.push({ type: 'empty', provider });
     for (const agent of group) {
-      rows.push({ type: 'agent', agent });
-      rows.push({ type: 'path', agent });
+      const row = agentRow(state, agent);
+      rows.push({ type: 'agent', agent, row });
+      if (rowSupplement(row)) rows.push({ type: 'agent-extra', agent, row });
     }
   }
   return rows;
@@ -80,12 +133,9 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
     ...shown.map((row, index) => {
       if (row.type === 'provider') return h(Box, { key: `p-${row.provider}`, height: 1, flexShrink: 0 }, line(`${providerName(row.provider)} (${row.count})`, { color: C.orange, bold: true }));
       if (row.type === 'empty') return h(Box, { key: `e-${row.provider}`, height: 1, flexShrink: 0 }, line('  No agents', { color: C.faint }));
-      const status = knownStatus(row.agent);
       const active = selected?.id === row.agent.id;
       return h(Click, { key: `${row.type}-${row.agent.id}`, registry, id: `${row.type}-${row.agent.id}`, action: () => model.action('select', row.agent.id), width: '100%', height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
-        row.type === 'agent' ? h(Box, { width: '100%', justifyContent: 'space-between' },
-          h(Box, { flexGrow: 1, minWidth: 0 }, line(`${active ? '›' : ' '} ${row.agent.name}`, { bold: active })),
-          line(` ${dots[status]} ${STATUS_LABELS[status]}`, { color: C[status] })) : line(`  ${row.agent.workspace?.name || 'Workspace?'} · ${row.agent.workspace?.path || 'Path unavailable'}`, { color: active ? C.muted : C.faint }));
+        row.type === 'agent' ? h(NamedRow, { row: row.row, active, width: width - 4 }) : line(`  ${rowSupplement(row.row)}`, { color: attention(row.row) ? C.blocked : C.faint }));
     }),
     h(Box, { flexGrow: 1 }),
     compactActions ? h(Box, { gap: 1, flexShrink: 0 },
@@ -96,17 +146,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
 }
 export function boardRows(state) {
   if (state.boardView !== 'tasks') return listRows(state);
-  return taskGroups(state).flatMap(group => [{ type: 'project', group }, ...group.rows.flatMap(row => [{ type: 'task', row }, { type: 'task-path', row }])]);
-}
-const taskColor = status => status === 'closed' ? C.faint : C[status] || (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(status) ? C.blocked : C.working);
-const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000 ? '<1m' : milliseconds < 3600000 ? `${Math.floor(milliseconds / 60000)}m` : `${Math.floor(milliseconds / 3600000)}h`;
-function taskSubline(row) {
-  if (!row.task) return row.agent.workspace?.path || 'Path unavailable';
-  const task = row.task;
-  if (['failed', 'uncertain', 'needs_input', 'needs_confirmation'].includes(taskPresentation(row))) return task.launch.message;
-  if (['done', 'idle'].includes(row.status) && task.summary) return summaryLabel(task.summary);
-  if (task.placement) return task.placement.mode === 'worktree' ? `worktree ${task.created?.worktree?.branch || task.placement.cwd}` : `${task.placement.targetKind} · ${task.placement.cwd}`;
-  return task.launch.message;
+  return taskGroups(state).flatMap(group => [{ type: 'project', group }, ...group.rows.flatMap(row => [{ type: 'task', row }, ...(rowSupplement(row) ? [{ type: 'task-extra', row }] : [])])]);
 }
 function TaskList({ state, model, width, height, registry, offset = 0, compactActions = false }) {
   const rows = boardRows(state);
@@ -117,9 +157,7 @@ function TaskList({ state, model, width, height, registry, offset = 0, compactAc
       if (item.type === 'project') return line(`${item.group.name} (${item.group.rows.length})`, { key: `group-${item.group.key}`, color: C.orange, bold: true });
       const row = item.row, active = row.id === state.selectedTaskId;
       return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('select-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
-        item.type === 'task' ? h(Box, { width: '100%', justifyContent: 'space-between' },
-          h(Box, { flexGrow: 1, minWidth: 0 }, line(`${active ? '›' : ' '} ${row.label}`, { bold: active })),
-          line(` ${width > 65 ? providerName(row.task?.agent.provider || row.agent?.provider) + ' ' : ''}${TASK_LABELS[taskPresentation(row)] || 'Starting'} ${elapsed(row.elapsedMs)}`, { color: taskColor(taskPresentation(row)) })) : line(`  ${taskSubline(row)}`, { color: active ? C.muted : C.faint }));
+        item.type === 'task' ? h(NamedRow, { row, active, width: width - 4 }) : line(`  ${rowSupplement(row)}`, { color: attention(row) ? C.blocked : C.faint }));
     }),
     !rows.length && line(state.projectsLoading ? 'Projects loading…' : state.query || state.filter !== 'all' ? 'No matching tasks.' : 'No tasks yet. /dispatch starts one.', { color: C.faint }),
     h(Box, { flexGrow: 1 }),
@@ -139,22 +177,26 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
   // This is a copyable command only. Use the response-confirmed creation
   // receipt, never infer ownership from a discovered path or placement mode.
   const workspaceArg = worktree && (/^[\w:.-]+$/.test(worktree.workspaceId) ? worktree.workspaceId : `'${worktree.workspaceId.replaceAll("'", "'\\''")}'`);
-  const content = [task.inputTask, '', `${providerName(task.agent.provider)} · ${TASK_LABELS[taskPresentation(row)]} · ${elapsed(row.elapsedMs)}`,
-    `Project: ${task.project.name}`, task.project.root, `Requested subfolder: ${task.subfolder || '(root)'}`,
+  const content = [task.inputTask, summaryLabel(task.summary), ...(task.summary?.at ? [`Checked: ${task.summary.at}`] : []), ...(task.summary?.message ? [task.summary.message] : []),
+    `Project: ${task.project.name}`, `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Requested subfolder: ${task.subfolder || '(root)'}`,
+    `${providerName(task.agent.provider)} · ${elapsed(row.elapsedMs)}`, `Project root: ${task.project.root}`,
     `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Awaiting target'}`,
-    `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
+    `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
     ...(worktree ? [`Branch: ${worktree.branch}`, `Worktree path: ${worktree.path}`, 'Manual removal in current Herdr instance:', `herdr worktree remove --workspace ${workspaceArg}`] : []),
-    `Startup: ${task.launch.message}`, `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`,
+    `Startup: ${task.launch.message}`,
     ...(task.locationNotice ? ['Location notice (exact):', task.locationNotice.event.message, `Full subfolder: ${task.locationNotice.subfolder}`] : []),
-    summaryLabel(task.summary), ...(task.summary?.at ? [`Checked: ${task.summary.at}`] : []), ...(task.summary?.message ? [task.summary.message] : [])];
-  const lines = content.flatMap(text => wrappedLines(text, Math.max(1, width - 4)));
+    `Pane: ${task.target?.paneId || 'Not confirmed'}`, `Terminal: ${task.target?.terminalId || 'Not confirmed'}`];
+  const lines = content.flatMap((text, index) => wrappedLines(text, Math.max(1, width - 4)).map(value => ({ value,
+    color: index >= content.length - 2 ? C.faint : index === 0 ? C.ink : C.muted })));
   const capacity = Math.max(1, height - 5);
   const offset = Math.min(state.detailOffset, Math.max(0, lines.length - capacity));
   useEffect(() => { if (state.detailOffset !== offset) model.action('detail-position', offset); }, [state.detailOffset, offset, model]);
 
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, paddingX: 1, flexDirection: 'column', overflow: 'hidden' },
-    line(`TASK · ${task.name}`, { color: C.orange, bold: true }),
-    ...lines.slice(offset, offset + capacity).map((text, index) => line(text, { key: index, color: C.muted })),
+    h(Box, { height: 1, flexShrink: 0 },
+      h(Box, { flexGrow: 1, minWidth: 0 }, line(`TASK · ${task.name}`, { color: C.ink, bold: true })),
+      line(' '), h(Badge, { status: taskPresentation(row) })),
+    ...lines.slice(offset, offset + capacity).map((item, index) => line(item.value, { key: index, color: item.color })),
     h(Box, { flexGrow: 1 }),
     h(Box, { gap: 0, flexShrink: 0 },
       h(Button, { label: '↑', registry, id: 'detail-up', action: () => model.action('detail-position', Math.max(0, offset - 1)) }),
@@ -168,24 +210,30 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
 
 function Detail({ state, model, width, height, registry }) {
   const agent = model.selected();
+  const row = agent && agentRow(state, agent);
+  if (row?.task) return h(OwnedTaskDetail, { state, model, width, height, registry, row });
   const disabled = Boolean(controlBlock(state)) || state.view === 'command';
+  const { name, pane } = row ? rowName(row) : {};
+  const content = agent ? ['Task text unavailable for this agent.', ...(attention(row) ? [rowSupplement(row)] : []), providerName(agent.provider),
+    agent.workspace?.path || 'Working directory unavailable', `Pane: ${agent.paneId}`, `Terminal: ${agent.terminalId || agent.id}`] : [];
+  const lines = content.flatMap((text, index) => wrappedLines(text, Math.max(1, width - 4)).map(value => ({ value, color: index >= content.length - 2 ? C.faint : C.muted })));
+  const capacity = Math.max(1, height - 5), offset = Math.min(state.detailOffset, Math.max(0, lines.length - capacity));
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
-    line('SELECTED AGENT', { color: C.muted, bold: true }),
-    h(Box, { height: 1, flexShrink: 0 }),
     agent ? h(Box, { flexDirection: 'column', flexGrow: 1, minHeight: 0 },
-      line(agent.name, { bold: true }),
-      line(`${dots[knownStatus(agent)]} ${STATUS_LABELS[knownStatus(agent)]}`, { color: C[knownStatus(agent)] }),
-      h(Box, { height: 1, flexShrink: 0 }),
-      line(providerName(agent.provider), { color: C.orange }),
-      line(`Workspace  ${agent.workspace?.name || 'Unavailable'}`, { color: C.muted }),
-      h(Text, { color: C.muted, wrap: 'wrap' }, safeText(agent.workspace?.path || 'Working directory unavailable')),
-      line(`Pane       ${agent.paneId}`, { color: C.faint }),
-      line(`Terminal   ${agent.terminalId || agent.id}`, { color: C.faint }),
+      h(Box, { height: 1, flexShrink: 0 }, h(Box, { flexGrow: 1, minWidth: 0 }, h(Text, { wrap: 'truncate-end' },
+        h(Text, { color: C.ink, bold: true }, name), pane && h(Text, { color: C.faint }, ' ' + pane))),
+        line(' '), h(Badge, { status: taskPresentation(row) })),
+      ...lines.slice(offset, offset + capacity).map((item, index) => line(item.value, { key: index, color: item.color })),
       h(Box, { flexGrow: 1 }),
-      h(Box, { gap: 1, flexShrink: 0 },
+      h(Box, { gap: 0, flexShrink: 0 },
+        h(Button, { label: '↑', registry, id: 'detail-up', action: () => model.action('detail-position', Math.max(0, offset - 1)) }),
+        h(Button, { label: '↓', registry, id: 'detail-down', action: () => model.action('detail-position', Math.min(lines.length - 1, offset + 1)) }),
+        line(`${offset + 1}–${Math.min(offset + capacity, lines.length)}/${lines.length}`, { color: C.faint })),
+      h(Box, { gap: 0, flexShrink: 0 },
         h(Button, { label: 'Enter Focus', registry, id: 'focus', disabled, action: () => model.action('focus') }),
-        h(Button, { label: 'x Close', registry, id: 'close', disabled, action: () => model.action('close') })),
-      line('Closing stops the agent process.', { color: C.faint })) : h(Box, { flexDirection: 'column' }, line('No agent selected', { color: C.faint }), line('n creates a native Herdr agent.', { color: C.muted })));
+        h(Button, { label: 'x Close', registry, id: 'close', disabled, action: () => model.action('close') }),
+        state.view === 'detail' && h(Button, { label: 'Esc Back', registry, id: 'detail-back', action: () => model.action('cancel') }))) :
+      h(Box, { flexDirection: 'column' }, line('No agent selected', { color: C.faint }), line('n creates a native Herdr agent.', { color: C.muted })));
 }
 function editorLines(text, cursor, width, height) {
   const chars = graphemes(text);
@@ -416,7 +464,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const activePanel = state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
   const List = state.boardView === 'tasks' ? TaskList : AgentList;
   const notice = state.notice?.message || (state.snapshot.source.state !== 'connected' ? `${state.snapshot.updatedAt ? 'Stale snapshot. ' : ''}${state.snapshot.source.message || 'Waiting for Herdr…'}` : state.snapshot.mode === 'demo' ? 'Sample agents only. Launch, focus and close are disabled.' : state.view === 'command' ? 'Colon optional for clear prefixes. Enter submits unless arrows selected a suggestion.' : state.view === 'confirm' ? 'Review the captured identity. Cancel is selected by default.' : state.view === 'compose' ? 'Optional launch settings. Escape keeps your draft.' : 'Ready. Type /dispatch your task, or select an agent to focus its native pane.');
-  let footer = state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n setup  s search  f filter  q quit';
+  let footer = state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n New agent  s search  f filter  q quit';
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
   if (state.view === 'follow-up') footer = 'Ctrl+S send · Esc keeps draft';
@@ -424,13 +472,18 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
   const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
   const clearableTasks = state.tasks.some(task => !task.dismissed && (task.live.status === 'closed' || task.launch.state === 'failed'));
-  const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n Setup → Project'}`;
+  const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n New agent → Project'}`;
+  const allRows = taskRows({ ...state, query: '', filter: 'all' });
+  const needsYou = allRows.filter(attention).length;
+  const working = allRows.filter(row => taskPresentation(row) === 'working').length;
+  const counts = h(Text, { wrap: 'truncate-end' }, h(Text, { color: needsYou ? C.blocked : C.muted, bold: needsYou > 0 }, `${needsYou ? '! ' : ''}${needsYou} need you`),
+    !short && h(Text, { color: C.muted }, ` · ${working} working · ${agents.length} agents`));
   const commandValue = state.command || '/dispatch [agent][@project][+wt][:] task';
   const commandDisplay = state.view === 'command' ? editorLines(state.command, state.cursor.command, Math.max(4, width - (width < 70 ? 4 : 10)), 1)[0] : commandValue;
   return h(Box, { width, height, flexDirection: 'column', backgroundColor: C.canvas, overflow: 'hidden' },
     h(Box, { height: headerHeight, flexShrink: 0, alignItems: compact ? 'flex-start' : 'center', gap: 1 },
       h(Dog, { compact }),
-      h(Box, { flexDirection: 'column', flexGrow: 1, minWidth: 0 }, line('shep.  Your agents, together.', { bold: true, color: C.orange }), !short && line(`${agents.length} agents · ${agents.filter(agent => agent.status === 'working').length} working · ${agents.filter(agent => agent.status === 'blocked').length} need you`, { color: C.muted })),
+      h(Box, { flexDirection: short ? 'row' : 'column', flexGrow: 1, minWidth: 0, gap: short ? 1 : 0 }, line(short ? 'shep.' : 'shep.  Your agents, together.', { bold: true, color: C.orange }), counts),
       h(Box, { flexDirection: 'column', flexShrink: 0, maxWidth: Math.floor(width * .35) }, line(status.label, { color: status.color, bold: true }), !compact && line(state.snapshot.source.scope || 'Current Herdr session', { color: C.faint }))),
     toolbarHeight > 0 && h(Box, { height: toolbarHeight, flexShrink: 0, flexDirection: 'column' },
       state.view === 'command' && width < 70 ? h(Box, { height: 1, flexShrink: 0 },
@@ -439,7 +492,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         h(Button, { label: 'Refresh', registry, id: 'command-refresh', action: () => model.action('refresh') }),
         h(Button, { label: 'Back', registry, id: 'command-back', action: () => model.action('cancel') })) :
       h(Box, { height: 1, flexShrink: 0, gap: 0 },
-        h(Button, { label: short ? 'n New' : 'n Setup', registry, id: 'new', disabled: state.view === 'command', action: () => model.action('new') }),
+        h(Button, { label: width < 70 ? 'n New' : 'n New agent', registry, id: 'new', disabled: state.view === 'command', action: () => model.action('new') }),
         h(Button, { label: `g ${state.boardView === 'tasks' ? 'Agents' : 'Tasks'}`, registry, id: 'board-toggle', action: () => model.action('board-toggle') }),
         h(Button, { label: `f ${state.filter === 'all' ? 'All' : TASK_LABELS[state.filter]}`, registry, id: 'filter', disabled: state.view === 'command', action: () => model.action('filter') }),
         h(Click, { registry, id: 'search', action: () => model.action('search'), flexGrow: 1, minWidth: 0 }, line(`s ${state.query}${state.view === 'search' ? '▏' : state.query ? '' : 'Search'}`, { color: state.view === 'search' ? C.orange : C.muted }))),

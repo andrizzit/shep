@@ -345,6 +345,8 @@ export const VALIDATION_PROBLEMS = freeze({
  * @property {{mode:'here'|'worktree',reason:string}} [placement] Target-stage decision, not a receipt or ActualPlacement.
  * @property {string} [message] Target-only notice, emitted before the first mutation.
  * @property {true} [noticeRequired] Target-only worktree notice requiring a visible-flush acknowledgement.
+ * @property {{paneId:string,terminalId:string,provider:string,agentName:string}} [target] Start-only exact created identity, for focus/observation; never cleanup authority.
+ * @property {'launch'|'type'} [delivery] Start-only selected route; never a delivery acknowledgement.
  */
 /**
  * @typedef {object} Outcome
@@ -376,6 +378,13 @@ export const VALIDATION_PROBLEMS = freeze({
  * observation supports submitted in that case; otherwise preserve uncertainty.
  * dispatch(request,{onProgress}={}) -> Promise<Outcome>;
  * onProgress(event) -> void|Promise<void>.
+ * Start progress may expose target/delivery after owned creation and exact checks.
+ * A matching task/attempt/provider/name may bind that target before the final outcome,
+ * observe metadata and focus it. Final certainty still comes from the dispatch promise.
+ * Pending startup focus keeps all identity/own-pane/stale/demo checks. Before agent
+ * detection it may focus only the controller-created tab whose fresh topology still
+ * contains exactly its captured sole pane; split/external/changed topology refuses.
+ * Close/follow-up retain startup locks. Early targets grant no cleanup/trust authority.
  * getProfiles() -> Promise<existing profiles plus {snapshot: private Herdr snapshot}>.
  * getControlSnapshot() -> Promise<complete fresh private snapshot>; no executable
  * availability scan. Agent-only public snapshots never prove that a pane disappeared.
@@ -766,6 +775,12 @@ export function validateProgressEvent(event) {
     event.noticeRequired === true && event.stage === 'target' && event.placement?.mode === 'worktree'
       && typeof event.message === 'string' && Boolean(event.message.trim()),
     'noticeRequired', 'invalid_progress', 'must mark a target-stage worktree notice with nonempty text');
+  if (event.target !== undefined) add(errors, event.stage === 'start' && plainObject(event.target)
+    && nonempty(event.target.paneId) && nonempty(event.target.terminalId)
+    && PROVIDER_IDS.includes(event.target.provider) && typeof event.target.agentName === 'string' && PATTERNS.agentName.test(event.target.agentName),
+    'target', 'invalid_progress', 'must identify the exact created pane, terminal, provider and agent name at start');
+  if (event.delivery !== undefined) add(errors, event.stage === 'start' && DELIVERY_MODES.includes(event.delivery),
+    'delivery', 'invalid_progress', 'must select launch or type at start');
   return errors;
 }
 

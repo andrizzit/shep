@@ -170,8 +170,13 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     return { ...await profiles(snapshot, own), snapshot: structuredClone(snapshot) };
   }
 
-  async function operation(target, action, workspace = false) {
-    const key = `${workspace ? 'workspace' : 'pane'}:${workspace ? target?.workspaceId : target?.paneId}`;
+  const sameStartupTarget = (target, captured) => captured && target?.paneId === captured.paneId && target?.terminalId === captured.terminalId
+    && target?.provider === captured.provider && (target?.agentName ?? target?.name) === captured.agentName;
+  async function operation(target, action, workspace = false, startupFocus = false) {
+    if (!workspace && operationLocks.has(`focus:${target?.paneId}`)) return outcome('failed', MESSAGES.busy, { code: 'busy' });
+    const ordinaryKey = `${workspace ? 'workspace' : 'pane'}:${workspace ? target?.workspaceId : target?.paneId}`;
+    const pendingStart = startupFocus && sameStartupTarget(target, operationLocks.get(ordinaryKey)?.startupTarget);
+    const key = pendingStart ? `focus:${target.paneId}` : ordinaryKey;
     if (operationLocks.has(key)) return outcome('failed', MESSAGES.busy, { code: 'busy' });
     const lock = { workspaceId: workspace ? target?.workspaceId : null };
     operationLocks.set(key, lock);
@@ -299,12 +304,21 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       const initial = await fresh();
       checkTarget(target, initial.own);
       if (!initial.snapshot.panes.some(p => p.pane_id === target.paneId && p.terminal_id === target.terminalId)) fail('changed_target');
+      let command = ['agent', 'focus', target.paneId];
       if (!initial.snapshot.agents.some(a => a.pane_id === target.paneId)) {
-        return outcome('needs_input', 'This pane has no detected agent yet. Select it directly in Herdr to review startup.', { code: 'agent_not_ready', paneId: target.paneId, terminalId: target.terminalId });
-      }
-      await checkedAgent(target);
+        const pending = operationLocks.get(`pane:${target.paneId}`);
+        const created = !target.sessionId && sameStartupTarget(target, pending?.startupTarget) ? receipts.get(pending.taskKey)?.created : null;
+        const receipt = created?.panes.find(pane => pane.paneId === target.paneId && pane.terminalId === target.terminalId);
+        const panes = receipt && initial.snapshot.panes.filter(pane => pane.tab_id === receipt.tabId);
+        if (!receipt || !created.tabIds.includes(receipt.tabId) || panes.length !== 1
+          || panes[0].pane_id !== receipt.paneId || panes[0].terminal_id !== receipt.terminalId || panes[0].workspace_id !== receipt.workspaceId
+          || !initial.snapshot.tabs?.some(tab => tab.tab_id === receipt.tabId && tab.workspace_id === receipt.workspaceId)) {
+          return outcome('needs_input', 'This pane has no detected agent yet. Select it directly in Herdr to review startup.', { code: 'agent_not_ready', paneId: target.paneId, terminalId: target.terminalId });
+        }
+        command = ['tab', 'focus', receipt.tabId];
+      } else await checkedAgent(target);
       try {
-        await invoke(['agent', 'focus', target.paneId]);
+        await invoke(command);
         const { snapshot } = await fresh();
         const pane = snapshot.panes.find(p => p.pane_id === target.paneId && p.terminal_id === target.terminalId);
         if (!pane || !(pane.focused || snapshot.focused_pane_id === target.paneId)) fail('invalid_response');
@@ -312,7 +326,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       } catch (error) {
         return outcome('uncertain', 'Focus could not be confirmed. Check Herdr; Shep will not repeat the action automatically.', { code: errorCode(error), paneId: target.paneId, terminalId: target.terminalId });
       }
-    });
+    }, false, true);
   }
 
   async function closeAgent(target) {

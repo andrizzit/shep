@@ -33,7 +33,6 @@ export function createLaunchRunner(deps) {
       state.name ??= `shep-${request.provider.slice(0, 12)}-${randomHex(5)}`;
       await createTarget(job, state);
       const { pane, name } = state;
-      await observe(job, 'start');
       const beforeStart = await fresh();
       if (!beforeStart.snapshot.panes.some(p => p.pane_id === pane.pane_id && p.terminal_id === pane.terminal_id && p.tab_id === pane.tab_id && p.workspace_id === pane.workspace_id)) fail('changed_target');
       if (!job.legacy) {
@@ -41,10 +40,14 @@ export function createLaunchRunner(deps) {
         if (await directory(currentPane.foreground_cwd ?? currentPane.cwd) !== job.placement.cwd) fail('changed_target');
       }
       if (operationLocks.has(`workspace:${pane.workspace_id}`) || operationLocks.has(`pane:${pane.pane_id}`)) fail('busy');
-      operationLocks.set(`pane:${pane.pane_id}`, { workspaceId: pane.workspace_id });
+      const earlyTarget = { paneId: pane.pane_id, terminalId: pane.terminal_id, provider: request.provider, agentName: name };
+      const startLock = { workspaceId: pane.workspace_id, startupTarget: earlyTarget, taskKey: job.key };
+      operationLocks.set(`pane:${pane.pane_id}`, startLock);
       try {
+        await observe(job, 'start', { target: { ...earlyTarget }, delivery: atLaunch ? 'launch' : 'type' });
         const start = await invoke(['agent', 'start', name, '--kind', request.provider, '--pane', pane.pane_id, '--timeout', '30000',
           ...(atLaunch || request.args?.length ? ['--', ...(request.args ?? []), ...(atLaunch ? [request.prompt] : [])] : [])], { timeoutMs: LIMITS.startTransportTimeoutMs });
+        delete startLock.startupTarget; delete startLock.taskKey;
         const target = { paneId: pane.pane_id, terminalId: pane.terminal_id, provider: request.provider, agentName: name,
           ...(start.result?.agent?.agent_session?.kind === 'id' ? { sessionId: start.result.agent.agent_session.value } : {}) };
         compareAgent(target, start.result?.agent);

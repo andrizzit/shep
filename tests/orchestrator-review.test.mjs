@@ -713,11 +713,14 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
       const state = await fixture.readState(); state.holdStart = false; await fixture.setState(state);
     }
     await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === index + 1, 'Slash command did not dispatch exactly once: ' + command);
-    await waitFor(() => hasStartedNotice(pty), 'Dispatch result did not reach Ink');
+    await waitFor(() => hasStartedNotice(pty) || (index === 0 && pty.screen().includes('Focused the selected agent pane.')
+      && pty.screen().includes('Startup: Prompt submitted.')), 'Dispatch result did not reach Ink');
     await delay(70);
     const calls = await fixture.calls();
     const starts = calls.filter(({ args }) => args[1] === 'start');
     const prompts = calls.filter(({ args }) => args[1] === 'prompt');
+    if (index === 0) assert.ok(calls.some(({ args }) => args[0] === 'agent' && args[1] === 'focus'
+      && args[2] === starts[0].args[starts[0].args.indexOf('--pane') + 1]), 'Pending Enter must focus the exact newly created pane');
     assert.equal(starts[index].args[starts[index].args.indexOf('--kind') + 1], provider);
     assert.equal(prompts[index].args[3], prompt);
   }
@@ -758,7 +761,7 @@ test('orchestrator QA: installed NO_COLOR layout fits exact terminal width and c
   delete fixture.env.FORCE_COLOR;
   const pty = await startInstalledPty(t, fixture, { columns: 123, rows: 35 });
   await enterAgents(pty);
-  await waitFor(() => pty.screen().includes('SELECTED AGENT'), 'Desktop detail panel did not render');
+  await waitFor(() => pty.screen().includes('alpha-fixture') && pty.screen().includes('Task text unavailable for this agent.'), 'Desktop detail panel did not render');
   const desktop = pty.screen().split('\n');
   const desktopTop = desktop.find(row => row.includes('╭'));
   assert.equal(desktopTop?.slice(-2), '╮ ', 'Desktop right border must fit with one reserved physical column');

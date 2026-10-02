@@ -108,7 +108,7 @@ export function createTargetService(deps) {
           }
           const prepared = await preparePlacementSnapshot(snapshot, { realpath: path => fs.realpath(path) });
           reconcileReservations(prepared);
-          plan = resolvePlacement({ intent: request.placement, project, snapshot: prepared, reservations: [...reservations.values()] });
+          plan = resolvePlacement({ intent: request.placement, project, snapshot: prepared });
           if (plan.mode === 'here') plan.cwd = current.cwd;
           if (plan.targetKind === 'workspace' && [...reservations.values()].some(r => r.projectKey === project.key && r.creatingWorkspace)) fail('placement_pending');
         } else {

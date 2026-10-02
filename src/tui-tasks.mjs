@@ -10,11 +10,15 @@ export const TASK_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs y
 export const TASK_FILTERS = Object.freeze(['all', 'working', 'blocked', 'done', 'unknown', 'closed', 'failed']);
 // Keep native status and launch certainty separate. Idle alone does not resolve
 // a startup question or an uncertain delivery; observed work can supersede it.
-export const taskPresentation = row => row.task && ['uncertain', 'needs_input', 'needs_confirmation'].includes(row.task.launch.state)
-  && !['working', 'done', 'closed'].includes(row.status) && !(row.status === 'idle' && row.task.observedActivity) ? row.task.launch.state : row.status;
+export const taskPresentation = row => {
+  if (row.task?.launch.delivery === 'launch' && row.status === 'idle' && !row.task.observedActivity) return 'needs_input';
+  return row.task && ['uncertain', 'needs_input', 'needs_confirmation'].includes(row.task.launch.state)
+    && !['working', 'done', 'closed'].includes(row.status) && !(row.status === 'idle' && row.task.observedActivity) ? row.task.launch.state : row.status;
+};
 export const taskGroups = state => groupTasks(state.tasks || [], state.snapshot.agents || [], state.projects || [], { query: state.query, filter: 'all' })
   .map(group => {
-    const rows = group.rows.filter(row => state.filter === 'all' || !state.filter || TASK_LABELS[taskPresentation(row)] === TASK_LABELS[state.filter]);
+    const rows = group.rows.filter(row => state.filter === 'all' || !state.filter || TASK_LABELS[taskPresentation(row)] === TASK_LABELS[state.filter])
+      .sort((a, b) => Number(TASK_LABELS[taskPresentation(b)] === 'Needs you') - Number(TASK_LABELS[taskPresentation(a)] === 'Needs you'));
     return { ...group, rows, active: rows.some(row => !['Done', 'Failed', 'Closed'].includes(TASK_LABELS[taskPresentation(row)])) };
   }).filter(group => group.rows.length)
   .sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
@@ -157,9 +161,11 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     }
     const name = nameInput || agentName(spec.inputTask, provider.id, { takenNames: [...read().snapshot.agents.map(agent => agent.name), ...read().tasks.map(task => task.name)] });
     const task = createTask(spec, { id: randomUUID(), attemptId: randomUUID(), at: new Date(now()).toISOString(), name, args, placement: intent });
-    change({ tasks: [...read().tasks, task], selectedTaskId: `task:${task.id}`, draft: { ...read().draft, provider: provider.id, prompt: spec.task, projectKey: spec.project.key, subfolder: spec.subfolder },
-      recall: source === 'command' ? [...read().recall.filter(item => item !== command), command].slice(-100) : read().recall, recallIndex: null });
-    await launch(task, source);
+    const recalled = source === 'command' ? command : `/dispatch ${provider.id}: ${spec.task}`;
+    change({ tasks: [...read().tasks, task], view: 'board', boardView: 'tasks', query: '', filter: 'all', detailOffset: 0,
+      selectedTaskId: `task:${task.id}`, draft: { ...read().draft, provider: provider.id, prompt: spec.task, projectKey: spec.project.key, subfolder: spec.subfolder },
+      recall: [...read().recall.filter(item => item !== recalled), recalled].slice(-100), recallIndex: null });
+    void launch(task, source);
   }
   function cancelNotices(taskId, attemptId) {
     for (const job of noticeJobs) if (!taskId || job.taskId === taskId && job.attemptId === attemptId) job.cancel();
@@ -189,7 +195,9 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
   }
   async function launch(task, source) {
     if (!alive) return;
-    change({ busy: 'dispatch', notice: { message: 'Starting a native Herdr agent…', kind: 'info' } });
+    const submittedDraft = read().draft, submittedCommand = read().command;
+    const ownsView = () => read().view === 'board' && read().boardView === 'tasks' && read().selectedTaskId === `task:${task.id}` && !read().busy;
+    change({ notice: { message: 'Starting a native Herdr agent…', kind: 'info' } });
     try {
       const result = await controller.dispatch({ taskId: task.id, attemptId: task.attemptId, provider: task.agent.provider,
         prompt: task.prompt, inputTask: task.inputTask, name: task.name, args: task.args, placement: task.intent }, {
@@ -198,36 +206,50 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
           const current = read().tasks.find(item => item.id === task.id);
           if (!current || current.attemptId !== event.attemptId || event.taskId !== task.id) return event.noticeRequired ? Promise.reject(new Error('The notice belongs to another attempt.')) : undefined;
           updateTask(task.id, item => ({ ...transition(item, { type: 'progress', event }), ...(event.noticeRequired ? { locationNotice: { event: structuredClone(event), subfolder: item.subfolder } } : {}) }));
+          if (event.target && ownsView()) {
+            const clear = event.delivery === 'launch' && read().draft === submittedDraft && read().command === submittedCommand;
+            change({ resultTarget: { ...event.target, id: event.target.terminalId, name: event.target.agentName, status: 'unknown' },
+              ...(clear ? { command: '', draft: { ...read().draft, name: '', prompt: '' }, cursor: { ...read().cursor, command: 0, name: 0, prompt: 0 } } : {}) });
+          }
           return event.noticeRequired ? requiredProgress(event) : undefined;
         },
       });
       if (!alive) return;
       cancelNotices(task.id, task.attemptId);
       updateTask(task.id, item => transition(item, { type: 'outcome', outcome: result }));
+      observe(read().snapshot);
       const successful = result.ok && result.state === 'submitted';
       const target = result.paneId ? { ...result, id: result.terminalId || result.paneId, provider: task.agent.provider, name: result.agentName || task.name, status: 'unknown', workspace: { path: result.placement?.cwd || task.project.root } } : null;
       const provider = read().profiles.providers.find(item => item.id === task.agent.provider)?.name || task.agent.provider;
-      const message = successful ? `${provider} started in ${task.project.name} · Enter to open`
+      const unobserved = result.delivery === 'launch' && !read().tasks.find(item => item.id === task.id)?.observedActivity;
+      const message = successful ? unobserved ? `${provider} opened in ${task.project.name} · check its pane` : `${provider} started in ${task.project.name} · Enter to open`
         : `${TASK_LABELS[result.state] || 'Needs you'} · ${result.message}${result.paneId ? ` Pane: ${result.paneId}.` : ''}`;
-      change({ busy: null, resultTarget: target, notice: { message: safeText(message), kind: successful ? 'success' : 'warning' },
-        ...(successful || target ? { view: 'board', boardView: 'tasks', query: '', filter: 'all', selectedTaskId: `task:${task.id}`, detailOffset: 0 } : {}),
-        ...(successful ? { command: '', draft: { ...read().draft, name: '', prompt: '' }, cursor: { ...read().cursor, command: 0, name: 0, prompt: 0 } } : {}) });
-      if (result.state === 'needs_confirmation') openDecision({ kind: 'trust', root: task.project.root, message: result.message, taskId: task.id,
-        proceed: async () => {
-          const current = read().tasks.find(item => item.id === task.id);
-          const next = transition(current, { type: 'confirmation', approved: true, attemptId: randomUUID(), at: new Date(now()).toISOString() });
-          updateTask(task.id, () => next);
-          await launch(next, source);
-        } });
-      observe(read().snapshot);
+      if (ownsView()) {
+        const clear = (successful || (result.delivery === 'launch' && result.state === 'needs_input'))
+          && read().draft === submittedDraft && read().command === submittedCommand;
+        change({ resultTarget: target, notice: { message: safeText(message), kind: successful && !unobserved ? 'success' : 'warning' },
+          ...(clear ? { command: '', draft: { ...read().draft, name: '', prompt: '' }, cursor: { ...read().cursor, command: 0, name: 0, prompt: 0 } } : {}) });
+        if (result.state === 'needs_confirmation') review(task.id);
+      }
     } catch (error) {
       if (!alive) return;
       cancelNotices(task.id, task.attemptId);
       // No fabricated success or identity when the transport violates its seam.
       updateTask(task.id, item => ({ ...item, launch: { ...item.launch, state: 'uncertain', message: 'Launch response unavailable. Inspect Herdr before another launch.' } }));
-      change({ busy: null, view: 'board', boardView: 'tasks', query: '', filter: 'all', selectedTaskId: `task:${task.id}` });
-      inform(`Needs you · ${error.message || 'Launch outcome unavailable.'} Check Herdr; your prompt is preserved.`, 'warning');
+      if (ownsView()) inform(`Needs you · ${error.message || 'Launch outcome unavailable.'} Check Herdr; your prompt is preserved.`, 'warning');
     }
+  }
+  function review(taskId) {
+    const task = read().tasks.find(item => item.id === taskId && !item.dismissed);
+    if (task?.launch.state !== 'needs_confirmation') return false;
+    openDecision({ kind: 'trust', root: task.project.root, message: task.launch.message, taskId,
+      proceed: async () => {
+        const current = read().tasks.find(item => item.id === taskId);
+        const next = transition(current, { type: 'confirmation', approved: true, attemptId: randomUUID(), at: new Date(now()).toISOString() });
+        updateTask(taskId, () => next);
+        void launch(next);
+      } });
+    return true;
   }
   async function decide(approved) {
     const decision = read().decision;
@@ -278,10 +300,10 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       if (!task.target || task.live.status === 'closed') return task;
       const agent = snapshot.agents.find(item => matchesTask(task, item));
       if (!agent) { missing = true; return task; }
-      if (!['submitted', 'needs_input', 'uncertain'].includes(task.launch.state)) return task;
       const status = ['working', 'blocked', 'done', 'idle', 'unknown'].includes(agent.status) ? agent.status : 'unknown';
-      const updated = transition(task, { type: 'live', status, since: new Date(now()).toISOString(), paneId: task.target.paneId, terminalId: task.target.terminalId });
-      if (!updated.target.sessionId && agent.sessionId) updated.target.sessionId = agent.sessionId;
+      const captured = !task.target.sessionId && agent.sessionId ? { ...task, target: { ...task.target, sessionId: agent.sessionId } } : task;
+      if (!['submitted', 'needs_input', 'uncertain'].includes(task.launch.state)) return ['working', 'done'].includes(status) ? { ...captured, observedActivity: true } : captured;
+      const updated = transition(captured, { type: 'live', status, since: new Date(now()).toISOString(), paneId: task.target.paneId, terminalId: task.target.terminalId });
       if (['working', 'done'].includes(status)) updated.observedActivity = true;
       if (['done', 'idle'].includes(status)) void refreshSummary(updated);
       return updated;
@@ -377,7 +399,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
     const task = read().tasks.find(item => !item.dismissed && item.live.status !== 'closed' && matchesTask(item, target));
     if (task) updateTask(task.id, item => transition(item, { type: 'follow-up', outcome, at: new Date(now()).toISOString() }));
   }
-  return { refresh, initializeProject, context, parse, submit, decide, otherFolder, projectFor, observe, dismiss, recordFollowUp,
+  return { refresh, initializeProject, context, parse, submit, decide, otherFolder, projectFor, observe, dismiss, recordFollowUp, review,
     inspect: rowId => { const task = read().tasks.find(item => `task:${item.id}` === rowId); if (task) void refreshSummary(task); },
     getTasks: () => structuredClone(read().tasks),
     destroy: () => { alive = false; discovery += 1; abort.abort(); cancelNotices(); consent.clear(); for (const timer of closedTimers.values()) clearTimeout(timer); closedTimers.clear(); } };

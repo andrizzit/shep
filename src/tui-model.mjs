@@ -1,6 +1,6 @@
 import { stripVTControlCharacters } from 'node:util';
 import { safeText } from './terminal.mjs';
-import { createTaskSession, taskRows, commandSuggestions, TASK_FILTERS } from './tui-tasks.mjs';
+import { createTaskSession, taskRows, taskPresentation, matchesTask, commandSuggestions, TASK_FILTERS } from './tui-tasks.mjs';
 import { validatePrompt } from './dispatch/contracts.mjs';
 
 export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs you', done: 'Done', idle: 'Done', unknown: 'Starting' });
@@ -11,6 +11,11 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 export const graphemes = value => [...segmenter.segment(String(value))].map(item => item.segment);
 export const knownStatus = agent => Object.hasOwn(STATUS_LABELS, agent?.status) ? agent.status : 'unknown';
 export const providerName = provider => providerNames.get(provider) || safeText(provider || 'Other');
+export function agentPresentation(state, agent) {
+  const status = knownStatus(agent), task = state.tasks?.find(task => !task.dismissed && matchesTask(task, agent));
+  const presentation = taskPresentation({ task, status });
+  return ['needs_input', 'needs_confirmation', 'uncertain'].includes(presentation) ? 'blocked' : presentation;
+}
 
 export function parseDispatch(command, providers) {
   const match = /^\/dispatch(?:[ \t]+([\s\S]*))?$/.exec(command);
@@ -46,11 +51,11 @@ export function visibleAgents(state) {
   const query = safeText(state.query).trim().toLocaleLowerCase();
   const order = ['claude', 'codex', 'grok', 'kiro'];
   return (state.snapshot.agents || []).filter(agent => {
-    if (state.filter !== 'all' && STATUS_LABELS[knownStatus(agent)] !== STATUS_LABELS[state.filter]) return false;
+    if (state.filter !== 'all' && STATUS_LABELS[agentPresentation(state, agent)] !== STATUS_LABELS[state.filter]) return false;
     return !query || [agent.name, agent.provider, agent.paneId, agent.workspace?.name, agent.workspace?.path].join(' ').toLocaleLowerCase().includes(query);
   }).sort((a, b) => {
     const index = provider => order.includes(provider) ? order.indexOf(provider) : order.length;
-    return index(a.provider) - index(b.provider) || (index(a.provider) === order.length ? a.provider.localeCompare(b.provider) : 0) || priority[knownStatus(a)] - priority[knownStatus(b)] || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+    return index(a.provider) - index(b.provider) || (index(a.provider) === order.length ? a.provider.localeCompare(b.provider) : 0) || priority[agentPresentation(state, a)] - priority[agentPresentation(state, b)] || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
   });
 }
 
@@ -99,6 +104,7 @@ export function editText(value, cursor, input, key = {}, multiline = false) {
 export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, onQuit = () => {} }) {
   let alive = true;
   let initialized = false;
+  let submitting = false;
   let catalogGeneration = 0;
   const subscribers = new Set();
   let state = {
@@ -164,10 +170,13 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     } catch (error) { change({ busy: null, notice: { message: safeText(error.message || 'The action failed. Check Herdr before retrying.'), kind: 'warning' } }); }
   }
   async function dispatch(source = 'compose') {
+    if (submitting) return;
     const blocked = controlBlock(state);
     if (blocked) { inform(blocked, 'warning'); return; }
     if (state.profilesLoading || state.profilesError) { inform('Launch settings are unavailable. Use Ctrl+R to refresh them.', 'warning'); return; }
-    await session.submit(source);
+    submitting = true;
+    try { await session.submit(source); }
+    finally { submitting = false; }
   }
   const followUpKey = target => JSON.stringify([target.paneId, target.terminalId, target.provider, target.agentName ?? null, target.sessionId ?? null]);
   function followUpBlock(target) {
@@ -331,6 +340,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     if (name === 'focus') {
       const target = selected();
       const task = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
+      if (task && session.review(task.id)) return;
       // The controller may know the newly created native target before the
       // public monitor does. It still validates the exact captured identity.
       if (!target && task?.target && task.live.status !== 'closed') void run('focus', { ...task.target, id: task.target.terminalId, name: task.name }, true);
