@@ -351,7 +351,7 @@ export const VALIDATION_PROBLEMS = freeze({
 /**
  * @typedef {object} Outcome
  * @property {boolean} ok
- * @property {string} state Dispatch: LAUNCH_OUTCOMES; actions: focused, closed, removed, failed, uncertain.
+ * @property {string} state Dispatch: LAUNCH_OUTCOMES; actions: focused, closed, removed, docked, undocked, recovered, failed, uncertain.
  * @property {string} message
  * @property {string} [code] Host codes are D0-qualified; ownership classification additionally requires the exact anchored native Git message and canonical root.
  * @property {'target'|'start'|'prompt'} [stage]
@@ -390,6 +390,13 @@ export const VALIDATION_PROBLEMS = freeze({
  * availability scan. Agent-only public snapshots never prove that a pane disappeared.
  * focus(target), closeAgent(target) -> Promise<Outcome>; close remains available for ANY
  *   selected agent with confirmation, identity/status rechecks and own-pane protection.
+ * dock({target}) -> Promise<Outcome>; move one freshly verified agent pane into
+ *   the Shep tab with an origin placeholder. A confirmed result includes the
+ *   moved target identity; no prompt or pane input is sent.
+ * undock() -> Promise<Outcome>; restore a verified moved pane to its origin,
+ *   or report uncertainty without retry. recoverDock() is the startup undock
+ *   path for a marker left by an earlier Shep process. Both use only the Herdr
+ *   placeholder label, never a local state or history file.
  * followUp({target,text}) -> Promise<Outcome>; no wait, 8 s timeout, no retry.
  * notify({title,body,sound}) -> Promise<void>; never throws. The first notification
  * failure invokes onNotice once per session. getConfig() supplies fresh config after
@@ -787,9 +794,9 @@ export function validateProgressEvent(event) {
 export function validateOutcome(outcome, { dispatch = true } = {}) {
   if (!plainObject(outcome)) return [issue('', 'invalid_outcome', VALIDATION_PROBLEMS.object)];
   const errors = [];
-  const states = dispatch ? LAUNCH_OUTCOMES : [...LAUNCH_OUTCOMES, 'focused', 'closed', 'removed', 'dismissed'];
+  const states = dispatch ? LAUNCH_OUTCOMES : [...LAUNCH_OUTCOMES, 'focused', 'closed', 'removed', 'dismissed', 'docked', 'undocked', 'recovered'];
   add(errors, states.includes(outcome.state), 'state', 'invalid_outcome', 'must be a documented outcome');
-  add(errors, typeof outcome.ok === 'boolean' && outcome.ok === ['submitted', 'focused', 'closed', 'removed', 'dismissed'].includes(outcome.state), 'ok', 'invalid_outcome', 'must agree with outcome state');
+  add(errors, typeof outcome.ok === 'boolean' && outcome.ok === ['submitted', 'focused', 'closed', 'removed', 'dismissed', 'docked', 'undocked', 'recovered'].includes(outcome.state), 'ok', 'invalid_outcome', 'must agree with outcome state');
   add(errors, typeof outcome.message === 'string', 'message', 'invalid_outcome', VALIDATION_PROBLEMS.string);
   if (outcome.delivery !== undefined) add(errors, DELIVERY_MODES.includes(outcome.delivery), 'delivery', 'invalid_outcome', 'must be launch or type');
   if (dispatch) for (const key of ['taskId', 'attemptId']) add(errors, nonempty(outcome[key]), key, 'invalid_outcome', 'must correlate the dispatch attempt');

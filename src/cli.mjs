@@ -178,17 +178,31 @@ Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
   let controller;
   let dispatchRuntime;
   let stopping = false;
+  let shutdownPromise;
   const shutdown = () => {
-    if (stopping) return;
+    if (stopping) return shutdownPromise;
     stopping = true;
-    if (dispatchRuntime) dispatchRuntime.dispose();
-    else controller?.dispose();
-    monitor.stop();
-    stopTerminal();
-    server.close();
-    server.closeAllConnections();
-    process.off('SIGINT', shutdown);
-    process.off('SIGTERM', shutdown);
+    shutdownPromise = (async () => {
+      try {
+        // Keep the controller and Herdr socket alive until the real agent pane
+        // has been returned to its original location (or recovery is left for
+        // the next start). The TUI hook also cancels a pending selection timer.
+        const restored = await stopTerminal.restoreDock?.();
+        if (restored === false) process.stderr.write('Shep dock: restore is uncertain; inspect Herdr before moving this pane.\n');
+      } catch (error) {
+        process.stderr.write('Shep dock: restore is uncertain; inspect Herdr before moving this pane.\n');
+      } finally {
+        if (dispatchRuntime) dispatchRuntime.dispose();
+        else controller?.dispose();
+        monitor.stop();
+        stopTerminal();
+        server.close();
+        server.closeAllConnections();
+        process.off('SIGINT', shutdown);
+        process.off('SIGTERM', shutdown);
+      }
+    })();
+    return shutdownPromise;
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

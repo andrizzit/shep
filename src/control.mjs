@@ -27,6 +27,7 @@ const PROVIDERS = [
 const KINDS = new Map(PROVIDERS.map(([id, name, executable]) => [id, { name, executable }]));
 const UNCERTAIN = new Set(['timeout', 'unavailable', 'invalid_response', 'too_large', 'disposed', 'agent_start_transport_failed']);
 const NEEDS_INPUT = new Set(['agent_not_ready', 'agent_blocked']);
+const DOCK_MARKER = 'shep-dock:v1:';
 const MESSAGES = Object.assign(Object.create(null), {
   outside_herdr: 'Agent controls require the current Herdr pane. Reopen Shep inside Herdr.',
   demo: 'Agent controls are unavailable in demo mode.',
@@ -53,6 +54,10 @@ const MESSAGES = Object.assign(Object.create(null), {
   self_target: 'Shep cannot focus or close its own pane as an agent.',
   changed_target: 'The selected agent changed or exited. Refresh and select it again.',
   changed_status: 'The agent status changed after selection. Review its current status before closing.',
+  dock_pending: 'The selected agent is still starting. Wait until it is ready before docking.',
+  dock_marker: 'A previous dock needs recovery. Restart Shep or inspect the marked pane in Herdr.',
+  dock_narrow: 'The Shep tab must be at least 120 columns wide to dock an agent.',
+  dock_missing: 'The docked agent or its placeholder changed. Inspect Herdr before trying again.',
   not_found: 'Herdr was not found. Check HERDR_BIN_PATH.',
   timeout: 'Herdr did not finish the request in time.',
   unavailable: 'The Herdr connection failed.',
@@ -66,8 +71,22 @@ class ControlError extends Error {
 }
 const present = value => typeof value === 'string' && value.length > 0 && !value.includes('\0');
 const fail = code => { throw new ControlError(code); };
-const outcome = (state, message, details = {}) => ({ ok: ['submitted', 'focused', 'closed', 'removed', 'dismissed'].includes(state), state, message, ...details });
+const outcome = (state, message, details = {}) => ({ ok: ['submitted', 'focused', 'closed', 'removed', 'dismissed', 'docked', 'undocked', 'recovered'].includes(state), state, message, ...details });
 const errorCode = error => typeof error?.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(error.code) ? error.code : 'failed';
+
+function parseDockMarker(label) {
+  if (typeof label !== 'string' || !label.startsWith(DOCK_MARKER)) return null;
+  try {
+    const value = JSON.parse(Buffer.from(label.slice(DOCK_MARKER.length), 'base64url').toString('utf8'));
+    if (value?.version !== 1 || !['ownTerminalId', 'agentTerminalId', 'provider', 'originTabId', 'originWorkspaceId'].every(key => present(value[key]))
+      || !(value.agentName === null || present(value.agentName)) || !(value.sessionId === null || present(value.sessionId))) return null;
+    return value;
+  } catch { return null; }
+}
+
+function dockLabel(value) {
+  return DOCK_MARKER + Buffer.from(JSON.stringify({ version: 1, ...value })).toString('base64url');
+}
 
 function commandRunner(context) {
   return (argv, { timeoutMs = 4000, maxBuffer = 8 * 1024 * 1024, signal } = {}) => new Promise((resolve, reject) => {
@@ -109,9 +128,15 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   let disposed = false;
   const active = () => { if (disposed) fail('disposed'); };
   const invoke = async (argv, options = {}) => {
+    const { allowDisconnected = false, ...transportOptions } = options;
     active();
-    if (hasMutation(argv)) assertLive();
-    const response = await transport(argv, { ...options, signal: abort.signal });
+    if (hasMutation(argv)) {
+      if (allowDisconnected) {
+        assertContext();
+        if (mode !== 'live' || monitor?.getSnapshot()?.mode === 'demo') fail('demo');
+      } else assertLive();
+    }
+    const response = await transport(argv, { ...transportOptions, signal: abort.signal });
     active();
     return response;
   };
@@ -125,7 +150,8 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   const messageFor = code => code === 'prelaunch_notice_failed' ? DISPATCH_MESSAGES.prelaunchNoticeFailed : MESSAGES[code] ?? 'The action could not be completed safely. Refresh and inspect Herdr.';
   const trusted = root => (getConfig()?.worktrees?.trustedRepos ?? []).includes(root);
   const jobKey = request => JSON.stringify([request.taskId, request.attemptId]);
-  const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove', 'rename'].includes(argv[1]);
+  const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove', 'rename', 'move', 'swap'].includes(argv[1]);
+  let dockState = null, dockBusy = false;
 
 
   function assertContext() {
@@ -333,6 +359,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   }
 
   async function closeAgent(target) {
+    if (dockState?.target.terminalId === target?.terminalId) return outcome('failed', 'Restore the docked agent before closing it.', { code: 'dock_marker' });
     return operation(target, async () => {
       await checkedAgent(target, true);
       let commandError;
@@ -383,6 +410,274 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     });
   }
 
+  const dockFailure = (error, details = {}) => outcome('failed', messageFor(errorCode(error)), { code: errorCode(error), ...details });
+  const uncertainDock = (message, error, details = {}) => outcome('uncertain', message, { code: errorCode(error), ...details });
+  const copyDockState = () => dockState ? structuredClone({ target: dockState.target, origin: dockState.origin,
+    placeholder: dockState.placeholder, phase: dockState.phase }) : null;
+
+  async function dockOperation(action, { requireLive = true } = {}) {
+    if (dockBusy) return outcome('failed', MESSAGES.busy, { code: 'busy' });
+    dockBusy = true;
+    const reserved = new Set();
+    const reserve = (...workspaceIds) => {
+      for (const workspaceId of new Set(workspaceIds)) {
+        if (!present(workspaceId) || reserved.has(workspaceId)) continue;
+        if ([...operationLocks.entries()].some(([key, lock]) => !reserved.has(lock.workspaceId)
+          && (lock.workspaceId === workspaceId || key === `workspace:${workspaceId}`))) fail('busy');
+        operationLocks.set(`workspace:${workspaceId}`, { workspaceId });
+        reserved.add(workspaceId);
+      }
+    };
+    try {
+      if (requireLive) assertLive();
+      else {
+        assertContext();
+        if (mode !== 'live' || monitor?.getSnapshot()?.mode === 'demo') fail('demo');
+      }
+      return await action(reserve);
+    }
+    catch (error) { return dockFailure(error); }
+    finally { for (const id of reserved) operationLocks.delete(`workspace:${id}`); dockBusy = false; }
+  }
+
+  async function paneGet(paneId) {
+    const pane = (await invoke(['pane', 'get', paneId])).result?.pane;
+    if (!pane || pane.pane_id !== paneId) fail('invalid_response');
+    return pane;
+  }
+
+  async function closeDockPlaceholder(state) {
+    const { snapshot } = await fresh();
+    const pane = snapshot.panes.find(item => item.pane_id === state.placeholder.paneId
+      && item.terminal_id === state.placeholder.terminalId);
+    if (!pane || snapshot.agents.some(agent => agent.pane_id === pane.pane_id || agent.terminal_id === pane.terminal_id)) fail('dock_missing');
+    const current = await paneGet(pane.pane_id);
+    if (current.terminal_id !== state.placeholder.terminalId || current.label !== state.marker
+      || present(current.agent) || current.launch_pending === true) fail('dock_missing');
+    await invoke(['pane', 'close', pane.pane_id], { allowDisconnected: true });
+    const after = await fresh();
+    if (after.snapshot.panes.some(item => item.terminal_id === state.placeholder.terminalId)) fail('invalid_response');
+  }
+
+  async function dockMarkers(snapshot) {
+    const found = [];
+    for (const candidate of snapshot.panes) {
+      const pane = await paneGet(candidate.pane_id);
+      if (typeof pane.label === 'string' && pane.label.startsWith(DOCK_MARKER)) found.push({ pane, marker: parseDockMarker(pane.label) });
+    }
+    return found;
+  }
+
+  async function movedAgent(target, terminalId, workspaceId, tabId) {
+    const { snapshot, own } = await fresh();
+    const matches = snapshot.panes.filter(pane => pane.terminal_id === terminalId);
+    if (matches.length !== 1) fail('dock_missing');
+    const pane = matches[0];
+    if (pane.workspace_id !== workspaceId || (tabId && pane.tab_id !== tabId) || pane.pane_id === own.pane_id) fail('dock_missing');
+    const updated = { ...target, paneId: pane.pane_id, terminalId };
+    compareAgent(updated, snapshot.agents.find(agent => agent.pane_id === pane.pane_id), false, true);
+    compareAgent(updated, (await invoke(['agent', 'get', pane.pane_id])).result?.agent, false, true);
+    return { snapshot, pane, target: updated, own };
+  }
+
+  async function dockCore(target, reserve) {
+    if (!present(target?.provider)) fail('invalid_target');
+    const { snapshot, own } = await fresh();
+    reserve(own.workspace_id);
+    checkTarget(target, own);
+    const source = snapshot.panes.find(pane => pane.pane_id === target.paneId && pane.terminal_id === target.terminalId);
+    if (!source) fail('changed_target');
+    reserve(source.workspace_id);
+    if (snapshot.panes.some(pane => pane.pane_id === target.paneId && String(pane.label ?? '').startsWith(DOCK_MARKER))) fail('invalid_target');
+    const markers = await dockMarkers(snapshot);
+    if (markers.some(({ marker }) => !marker)) fail('dock_marker');
+    if (markers.length) fail('dock_marker');
+    const { agent } = await checkedAgent(target, false, true);
+    if (agent.launch_pending === true || snapshot.agents.find(item => item.pane_id === target.paneId)?.launch_pending === true) fail('dock_pending');
+    const layout = (await invoke(['pane', 'layout', '--pane', own.pane_id])).result?.layout;
+    if (layout?.workspace_id !== own.workspace_id || layout?.tab_id !== own.tab_id
+      || !layout.panes?.some(item => item.pane_id === own.pane_id)) fail('dock_narrow');
+    const paneWidths = layout?.panes?.map(item => Number(item.rect?.x ?? 0) + Number(item.rect?.width)).filter(Number.isFinite) ?? [];
+    const columns = layout?.columns ?? layout?.cols ?? layout?.size?.columns ?? layout?.size?.width ?? Math.max(0, ...paneWidths);
+    if (layout?.zoomed || !Number.isFinite(columns) || columns < 120) fail('dock_narrow');
+    const captured = { ...target, agentName: Object.hasOwn(target, 'agentName') ? target.agentName : target.name ?? null };
+    const marker = dockLabel({ ownTerminalId: own.terminal_id, agentTerminalId: target.terminalId,
+      provider: target.provider, agentName: captured.agentName, sessionId: trustedSession(target.provider, target.sessionId) ?? null,
+      originTabId: source.tab_id, originWorkspaceId: source.workspace_id });
+    const before = await checkedAgent(captured, false, true);
+    if (before.snapshot.panes.find(pane => pane.pane_id === source.pane_id)?.terminal_id !== source.terminal_id) fail('changed_target');
+    let placeholder, moveAttempted = false;
+    try {
+      const result = (await invoke(['pane', 'split', '--pane', source.pane_id, '--direction', 'right', '--ratio', '0.5',
+        ...(isAbsolute(source.foreground_cwd ?? source.cwd ?? '') ? ['--cwd', source.foreground_cwd ?? source.cwd] : []), '--no-focus'])).result;
+      placeholder = result?.pane;
+      if (!present(placeholder?.pane_id) || !present(placeholder?.terminal_id) || placeholder.tab_id !== source.tab_id
+        || placeholder.workspace_id !== source.workspace_id || placeholder.pane_id === source.pane_id) fail('invalid_response');
+      await invoke(['pane', 'rename', placeholder.pane_id, marker]);
+      const marked = await paneGet(placeholder.pane_id);
+      if (marked.terminal_id !== placeholder.terminal_id || marked.label !== marker) fail('invalid_response');
+      dockState = { target: captured, origin: { tabId: source.tab_id, workspaceId: source.workspace_id },
+        placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id }, marker, phase: 'preparing' };
+      await checkedAgent(captured, false, true);
+      moveAttempted = true;
+      const moved = (await invoke(['pane', 'move', source.pane_id, '--tab', own.tab_id, '--split', 'right',
+        '--target-pane', own.pane_id, '--ratio', '0.7', '--no-focus'])).result?.move_result;
+      if (moved?.changed !== true || moved?.pane?.terminal_id !== target.terminalId) fail('invalid_response');
+      const verified = await movedAgent(captured, target.terminalId, own.workspace_id, own.tab_id);
+      if (snapshot.focused_pane_id === own.pane_id && [moved.focused_pane_id, moved.target_layout?.focused_pane_id,
+        verified.snapshot.focused_pane_id].some(id => present(id) && id !== own.pane_id)) fail('invalid_response');
+      const place = await paneGet(placeholder.pane_id);
+      if (place.terminal_id !== placeholder.terminal_id || place.label !== marker || place.tab_id !== source.tab_id
+        || place.workspace_id !== source.workspace_id) fail('dock_missing');
+      dockState = { ...dockState, target: verified.target, phase: 'docked' };
+      return outcome('docked', 'Selected agent docked beside Shep.', { target: structuredClone(verified.target) });
+    } catch (error) {
+      if (dockState && moveAttempted) dockState.phase = 'uncertain';
+      if (!dockState && placeholder?.pane_id && placeholder?.terminal_id) {
+        try {
+          const current = (await fresh()).snapshot;
+          const pane = current.panes.find(item => item.pane_id === placeholder.pane_id && item.terminal_id === placeholder.terminal_id
+            && item.tab_id === source.tab_id && item.workspace_id === source.workspace_id);
+          if (pane && !current.agents.some(item => item.pane_id === pane.pane_id)) {
+            const exact = await paneGet(pane.pane_id);
+            if (exact.terminal_id === placeholder.terminal_id && !present(exact.agent) && exact.launch_pending !== true)
+              await invoke(['pane', 'close', pane.pane_id], { allowDisconnected: true });
+          }
+        } catch { /* An uncertain created pane is left for inspection. */ }
+      }
+      return uncertainDock('Dock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
+        { target: dockState?.target ?? captured });
+    }
+  }
+
+  async function undockCore(reserve) {
+    if (!dockState) return outcome('undocked', 'No agent is docked.');
+    const state = dockState;
+    if (state.phase === 'uncertain') return outcome('uncertain', 'Dock movement was uncertain. Inspect Herdr before restoring it.', { code: 'dock_missing', target: structuredClone(state.target) });
+    const { snapshot, own } = await fresh();
+    reserve(own.workspace_id, state.origin.workspaceId);
+    const candidate = snapshot.panes.filter(pane => pane.terminal_id === state.target.terminalId);
+    if (candidate.length > 1) fail('dock_missing');
+    const placeholder = snapshot.panes.find(pane => pane.terminal_id === state.placeholder.terminalId);
+    if (placeholder) {
+      const current = await paneGet(placeholder.pane_id);
+      if (current.label !== state.marker || current.terminal_id !== state.placeholder.terminalId
+        || current.workspace_id !== state.origin.workspaceId || present(current.agent) || current.launch_pending === true
+        || snapshot.agents.some(agent => agent.pane_id === placeholder.pane_id || agent.terminal_id === placeholder.terminal_id)) fail('dock_missing');
+      state.placeholder.paneId = placeholder.pane_id;
+    }
+    if (!candidate.length) {
+      if (!placeholder) fail('dock_missing');
+      await closeDockPlaceholder(state);
+      dockState = null;
+      return outcome('undocked', 'The closed agent dock was cleared.');
+    }
+    const current = candidate[0];
+    const verified = await movedAgent(state.target, state.target.terminalId, current.workspace_id, current.tab_id);
+    if (current.tab_id !== own.tab_id && !(state.phase === 'preparing' && current.tab_id === state.origin.tabId)
+      && !(state.phase === 'restoring' && current.workspace_id === state.origin.workspaceId)) fail('dock_missing');
+    if (state.phase === 'preparing' && current.tab_id === state.origin.tabId) {
+      if (!placeholder) fail('dock_missing');
+      await closeDockPlaceholder(state);
+      dockState = null;
+      return outcome('undocked', 'Unfinished dock cleared.', { target: verified.target });
+    }
+    if (state.phase === 'restoring') {
+      if (placeholder) await closeDockPlaceholder(state);
+      dockState = null;
+      return outcome('undocked', 'Agent returned to its original workspace.', { target: verified.target });
+    }
+    const originWorkspace = snapshot.workspaces.some(workspace => workspace.workspace_id === state.origin.workspaceId);
+    const originTab = originWorkspace && placeholder && snapshot.tabs?.some(tab => tab.tab_id === state.origin.tabId && tab.workspace_id === state.origin.workspaceId);
+    const command = originTab
+      ? ['pane', 'move', current.pane_id, '--tab', state.origin.tabId, '--split', 'right', '--target-pane', placeholder.pane_id, '--ratio', '0.5', '--no-focus']
+      : originWorkspace
+        ? ['pane', 'move', current.pane_id, '--new-tab', '--workspace', state.origin.workspaceId, '--label', 'Restored agent', '--no-focus']
+        : ['pane', 'move', current.pane_id, '--new-workspace', '--label', 'Restored origin', '--tab-label', 'Restored agent', '--no-focus'];
+    const moved = (await invoke(command, { allowDisconnected: true })).result?.move_result;
+    if (moved?.changed !== true || moved?.pane?.terminal_id !== state.target.terminalId) fail('invalid_response');
+    const restored = await movedAgent(verified.target, state.target.terminalId,
+      originWorkspace ? state.origin.workspaceId : moved.pane.workspace_id, originTab ? state.origin.tabId : moved.pane.tab_id);
+    state.target = restored.target;
+    state.origin = { tabId: restored.pane.tab_id, workspaceId: restored.pane.workspace_id };
+    state.phase = 'restoring';
+    if (placeholder) {
+      await closeDockPlaceholder(state);
+    }
+    dockState = null;
+    return outcome('undocked', 'Agent returned to its original tab.', { target: restored.target });
+  }
+
+  async function dock({ target } = {}) {
+    return dockOperation(async reserve => {
+      let restoredTarget;
+      if (dockState) {
+        if (dockState.phase === 'uncertain') return outcome('uncertain', 'Dock movement was uncertain. Inspect Herdr before docking again.', { code: 'dock_missing' });
+        if (dockState.phase === 'docked' && target?.terminalId === dockState.target.terminalId
+          && target?.provider === dockState.target.provider && (target?.agentName ?? target?.name ?? null) === dockState.target.agentName) {
+          await movedAgent(dockState.target, dockState.target.terminalId, pinned.context.workspaceId, pinned.context.tabId);
+          if (!sessionMatches(target.provider, target.sessionId, dockState.target.sessionId, true)) fail('changed_target');
+          return outcome('docked', 'Selected agent is already docked.', { target: structuredClone(dockState.target) });
+        }
+        const restored = await undockCore(reserve);
+        if (!restored.ok) return restored;
+        restoredTarget = restored.target;
+      }
+      try {
+        const result = await dockCore(target, reserve);
+        return restoredTarget ? { ...result, restoredTarget } : result;
+      } catch (error) { return { ...dockFailure(error), ...(restoredTarget ? { restoredTarget } : {}) }; }
+    });
+  }
+
+  async function undock() {
+    return dockOperation(async reserve => {
+      try { return await undockCore(reserve); }
+      catch (error) { return uncertainDock('Undock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
+        { ...(dockState?.target ? { target: structuredClone(dockState.target) } : {}) }); }
+    }, { requireLive: false });
+  }
+
+  async function recoverDock() {
+    return dockOperation(async reserve => {
+      if (dockState) return outcome('failed', MESSAGES.busy, { code: 'busy' });
+      const { snapshot, own } = await fresh();
+      const markers = await dockMarkers(snapshot);
+      if (markers.some(({ marker }) => !marker)) return outcome('failed', 'A malformed dock marker needs manual inspection in Herdr.', { code: 'dock_marker' });
+      if (markers.length > 1) return outcome('failed', 'Multiple dock placeholders need manual inspection in Herdr.', { code: 'dock_marker' });
+      const marked = markers.filter(({ marker }) => marker?.ownTerminalId === own.terminal_id);
+      if (markers.length && !marked.length) return outcome('failed', 'A dock placeholder belongs to another Shep pane. Inspect Herdr before docking.', { code: 'dock_marker' });
+      if (!marked.length) return outcome('recovered', 'No leftover dock was found.');
+      const { pane: placeholder, marker } = marked[0];
+      const agentPane = snapshot.panes.filter(pane => pane.terminal_id === marker.agentTerminalId);
+      if (agentPane.length > 1 || agentPane[0]?.pane_id === own.pane_id)
+        return outcome('failed', 'Leftover dock could not be matched safely. Inspect Herdr.', { code: 'dock_missing' });
+      const target = { paneId: agentPane[0]?.pane_id, terminalId: marker.agentTerminalId, provider: marker.provider,
+        agentName: marker.agentName, sessionId: marker.sessionId };
+      try {
+        dockState = { target, origin: { tabId: marker.originTabId, workspaceId: marker.originWorkspaceId },
+          placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id }, marker: placeholder.label, phase: 'docked' };
+        if (!agentPane.length) {
+          await closeDockPlaceholder(dockState);
+          dockState = null;
+          return outcome('recovered', 'Cleared a leftover dock for a closed agent.');
+        }
+        if (agentPane[0].workspace_id === marker.originWorkspaceId && agentPane[0].tab_id === marker.originTabId) {
+          await movedAgent(target, target.terminalId, marker.originWorkspaceId, marker.originTabId);
+          await closeDockPlaceholder(dockState);
+          dockState = null;
+          return outcome('recovered', 'Cleared a leftover dock after the agent returned.', { target });
+        }
+        if (agentPane[0].tab_id !== own.tab_id || agentPane[0].workspace_id !== own.workspace_id) fail('dock_missing');
+        await movedAgent(target, target.terminalId, own.workspace_id, own.tab_id);
+        const result = await undockCore(reserve);
+        return result.ok ? outcome('recovered', 'Recovered the agent from the previous dock.', { target: result.target }) : result;
+      } catch (error) {
+        return uncertainDock('Leftover dock could not be restored safely. Inspect Herdr.', error);
+      }
+    }, { requireLive: false });
+  }
+
   async function notify({ title, body, sound = 'none' } = {}) {
     try {
       assertLive();
@@ -422,5 +717,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   const { listWorktrees, removeWorktree } = createCleanupOperations({ assertLive, directory: targetService.directory,
     invoke, trusted, fail, operation, receipts, pinned, locked, getControlSnapshot, fs, outcome,
     operationLocks, jobs, UNCERTAIN, errorCode, messageFor, reservations });
-  return { getProfiles, getControlSnapshot, dispatch, focus, closeAgent, followUp, rename, notify, listWorktrees, removeWorktree, dismissTask, dispose };
+  return { getProfiles, getControlSnapshot, dispatch, focus, closeAgent, followUp, rename,
+    dock, undock, recoverDock, getDockState: copyDockState,
+    notify, listWorktrees, removeWorktree, dismissTask, dispose };
 }

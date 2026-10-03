@@ -7,7 +7,7 @@
 
 Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
 
-This branch provides **0.4.0-checkpoint.8.2**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
+This branch provides **0.4.0-checkpoint.9**, a local, unpublished preview of project-aware dispatch with a live agent dock. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
@@ -26,6 +26,7 @@ For the full daily workflow, read the [Shep operating procedure](docs/SOP.md): d
 - Groups agents by provider, including Claude, Codex, Grok, Kiro, and additional types reported by Herdr.
 - Shows the session's recorded model and reasoning effort for linked Claude and Grok agents in the terminal.
 - Lets you select agents with arrow keys or a mouse, rename them, focus their real panes, send follow-ups and confirm closing them.
+- Docks the selected agent's real Herdr pane beside the list in a tab at least 120 columns wide, then returns it to its original location when you switch or quit.
 - Hides confirmed closed task rows after about five seconds; clears failed rows on request without removing panes, files or worktrees.
 - Shows Starting, Working, Needs you, Done, Failed and briefly Closed in the terminal; the browser retains Herdr's native statuses.
 - Displays each agent's workspace and working directory across the current Herdr session.
@@ -65,7 +66,7 @@ The public default branch may still be 0.3.0 while this preview is unpushed. To 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.8.2.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.9.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -124,7 +125,9 @@ Startup-path Needs you clears the submitted draft; the typed path keeps unsent t
 
 Press **g** to switch between Tasks grouped by project and Agents grouped by provider. Tasks and drafts last only for this run. After restarting, still-running agents appear in the Agents view.
 
-Use **↑/↓** to select an agent and **Enter** to focus its actual Herdr pane. Mouse clicks select agents; the Focus and Close buttons act on that selection. **x** opens a close confirmation. Closing an agent ends that pane’s process; it is separate from quitting Shep, which leaves all agents running.
+In a tab at least 120 columns wide, use **↑/↓** or click a row and pause for about 400 ms. Shep moves that agent's actual Herdr pane into a dock on the right while keeping keyboard focus on Shep. The details panel gives way to the list and a one-line selected-agent header. **Enter** focuses the docked pane so you can type, scroll, and answer dialogs there. With Herdr's default keys, press **Ctrl+B**, then **h** to return to Shep from the right pane; use your configured `focus_pane_left` binding if you changed it. Selecting another agent returns the previous pane to its original location first. **t** turns the dock off and shows details again; press **t** again to resume it. Narrower tabs keep the checkpoint 8.2 layout and Enter behavior.
+
+Shep keeps a labeled placeholder in the agent's original tab while its pane is docked. On a normal quit, switch, toggle, or close, it returns the pane and removes the placeholder. If Shep crashes, the next startup checks for that marker and restores the agent when its identity is still certain; otherwise it shows a notice so you can inspect Herdr. The dock does not close, restart, or type into an agent. **x** opens a close confirmation after returning a docked agent; closing still ends that pane's process only after you confirm.
 
 Press **e Rename** on a selected agent in either Tasks or Agents. The one-line editor starts with its current name, or is empty for an unnamed agent. Use **Enter** to rename or **Esc** to cancel. Names start with `a`–`z`, then use `a`–`z`, `0`–`9`, `_` or `-`, up to 32 characters; invalid names are refused inline. Agents opened outside Shep can be renamed too. Shep verifies the pane, terminal and provider before sending the rename once, and checks the result afterwards. Its own pane, stale/demo data and agents still starting stay protected. Renaming a tracked task keeps its agent attached.
 
@@ -173,7 +176,9 @@ Shep only persists a configuration change when you explicitly confirm trust for 
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` or `k` / `j` | Select an agent |
-| `Enter` | Focus the selected agent’s actual Herdr pane |
+| `Enter` | Focus the docked agent, or the selected agent in a narrow tab or with the dock off |
+| `t` | Toggle the live dock and details panel in a wide tab |
+| `Ctrl+B`, then `h` | Return from a right dock to Shep with Herdr's default pane navigation |
 | `/` | Enter `/dispatch [provider][@project][:] your task`; press Enter to launch |
 | `g` | Switch Tasks / Agents |
 | `d` / `→` | Open selected task or agent details; use Up/Down to scroll |

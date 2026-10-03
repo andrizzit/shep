@@ -499,6 +499,14 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
     line('q / Ctrl+C quit; your agents keep running.', { color: C.muted }));
   const compact = height < 25;
   const short = height < 17;
+  const dockListOnly = Boolean(state.dockedTarget) && ['board', 'search'].includes(state.view);
+  const selectedRow = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId) : null;
+  const selectedAgent = model.selected() ?? (selectedRow ? null : state.snapshot.agents.find(agent => agent.terminalId === state.dockedTarget?.terminalId));
+  const selectedInfo = selectedAgent && state.modelInfoByAgent?.[selectedAgent.id];
+  const selectedProvider = selectedRow?.task?.agent.provider || selectedAgent?.provider;
+  const dockHeader = selectedRow || selectedAgent ? [selectedRow?.task?.name || selectedAgent?.name || providerName(selectedProvider),
+    TASK_LABELS[selectedRow ? taskPresentation(selectedRow) : agentPresentation(state, selectedAgent)] || 'Starting',
+    providerName(selectedProvider), selectedInfo?.model || 'Model unknown', selectedInfo?.effort || 'Effort unknown'].join(' · ') : 'Dock · Select an agent';
   const status = health(state);
   const agents = state.snapshot.agents || [];
   const headerHeight = short ? 1 : compact ? 2 : 4;
@@ -507,8 +515,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : 2;
   const suggestionRows = state.view === 'command' && state.suggestions.length ? Math.max(1, Math.min(5, state.suggestions.length, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - 5)) : 0;
   const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
-  const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
-  const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
+  const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight - (dockListOnly ? 1 : 0));
+  const split = !dockListOnly && width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
   const listWidth = split ? Math.floor(width * (width >= 110 ? .7 : .52)) : width;
   const rightWidth = width - listWidth;
   const activePanel = state.view === 'rename' ? RenameEditor : state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
@@ -519,7 +527,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
   if (state.view === 'follow-up') footer = 'Ctrl+S send · Esc keeps draft';
   if (state.view === 'rename') footer = 'Enter rename · Esc cancel';
-  const boardActions = ['board', 'detail'].includes(state.view);
+  if (dockListOnly) footer = short ? 'Ctrl+B h Shep · t off' : 'Enter focus · t dock off · ↑↓ select · x close · q quit';
+  const boardActions = !dockListOnly && ['board', 'detail'].includes(state.view);
   const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
   const renameDisabled = !model.selected() || Boolean(state.busy || controlBlock(state)) || model.selected()?.launchPending === true || ['queued', 'starting'].includes(selectedTask?.launch.state);
   const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
@@ -555,11 +564,12 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         state.view === 'command' && width >= 70 && h(Button, { label: '↑', registry, id: 'recall-prev', action: () => model.action('command-recall', -1) }),
         state.view === 'command' && width >= 70 && h(Button, { label: '↓', registry, id: 'recall-next', action: () => model.action('command-recall', 1) }))),
     suggestionHeight > 0 && h(Suggestions, { state, model, width, rows: suggestionRows, registry }),
+    dockListOnly && h(Box, { height: 1, paddingX: 1, flexShrink: 0 }, line(truncate(dockHeader, width - 2), { color: C.orange, bold: true })),
     h(Box, { height: bodyHeight, flexShrink: 0 },
       suggestionHeight > 0 && bodyHeight < 5 ? null : split ? h(React.Fragment, null,
         h(List, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
-        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up', 'rename'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
+        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up', 'rename'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: !dockListOnly })),
     state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
       h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4)))),
     h(Box, { height: footerHeight, flexDirection: 'column', flexShrink: 0 },
@@ -570,7 +580,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         boardActions && clearable && h(Button, { label: 'c Clear', registry, id: 'clear', action: () => model.action('clear') }),
         boardActions && clearableTasks && h(Button, { label: 'C All', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),
         h(Box, { flexGrow: 1, minWidth: 0 }, line(footer, { color: C.muted }))),
-      !short && h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint }))));
+      !short && (dockListOnly ? line('Ctrl+B then h returns to Shep', { color: C.faint }) :
+        h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint })))));
 }
 
 function App({ model, url, output, registry, onNoticeRendered }) {
@@ -581,6 +592,7 @@ function App({ model, url, output, registry, onNoticeRendered }) {
   // state. Herdr can also report one extra column on entering alternate screen.
   const width = Math.max(1, Math.min(300, (size.columns || output.columns || 100) - 1));
   const height = Math.max(1, Math.min(120, (size.rows || output.rows || 28) - 1));
+  useEffect(() => { model.action('viewport-resized', width); }, [model, width]);
   const [offset, setOffset] = useState(0);
   const rows = boardRows(state);
   const header = height < 25 ? 2 : 4;
@@ -647,8 +659,15 @@ export function startTui({ monitor, controller, registry: projects, getConfig, r
     // aligned while the frame remains bounded by the terminal dimensions.
     instance = render(h(App, { model, url, output, registry, onNoticeRendered: token => { renderedNotice = token; } }), { stdin: input, stdout: output, stderr: output, exitOnCtrlC: false, patchConsole: false, alternateScreen: true, interactive: true, incrementalRendering: false, maxFps: 30 });
     output.write(MOUSE_ON);
-    instance.waitUntilExit().then(() => { if (!stopped) { stop(); onQuit?.(); } }, error => {
+    instance.waitUntilExit().then(async () => { if (!stopped) {
+      const restored = await model.restoreDock();
       stop();
+      if (!restored) try { output.write('Shep dock: restore could not be confirmed. Inspect Herdr.\n'); } catch { /* Detached output. */ }
+      onQuit?.();
+    } }, async error => {
+      const restored = await model.restoreDock();
+      stop();
+      if (!restored) try { output.write('Shep dock: restore could not be confirmed. Inspect Herdr.\n'); } catch { /* Detached output. */ }
       onQuit?.();
       process.exitCode = 1;
       try { output.write(`Shep terminal: ${safeText(error.message)}\n`); } catch { /* Detached output. */ }
@@ -658,5 +677,6 @@ export function startTui({ monitor, controller, registry: projects, getConfig, r
   stop.waitUntilRenderFlush = () => instance.waitUntilRenderFlush();
   stop.getTasks = model.getTasks;
   stop.showNotice = model.showNotice;
+  stop.restoreDock = model.restoreDock;
   return stop;
 }
