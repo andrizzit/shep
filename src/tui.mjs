@@ -4,6 +4,7 @@ import { render, Box, Text, useInput, usePaste, useWindowSize, measureElement } 
 import { createTuiModel, visibleAgents, knownStatus, agentPresentation, STATUS_LABELS, providerName, FIELDS, graphemes, parseMouse, hitTest, controlBlock } from './tui-model.mjs';
 import { taskGroups, taskRows, TASK_LABELS, taskPresentation, matchesTask, displayArgs, summaryLabel } from './tui-tasks.mjs';
 import { safeText, displayWidth } from './terminal.mjs';
+import { createModelReader } from './model-info.mjs';
 
 export const TUI_COLORS = Object.freeze({ canvas: '#111b19', panel: '#172420', selected: '#293f34', border: '#465c4e', ink: '#eef2e8', muted: '#acb9ac', faint: '#829889', orange: '#f09365', working: '#e5c86e', blocked: '#f18b89', done: '#7fd3c7', idle: '#93cd95', unknown: '#a2aaa5' });
 const C = TUI_COLORS;
@@ -86,21 +87,38 @@ function Badge({ status }) {
     color: label === 'Needs you' ? C.canvas : taskColor(status), backgroundColor: label === 'Needs you' ? C.blocked : undefined,
     bold: label === 'Needs you' || status === 'working' }, text));
 }
-function NamedRow({ row, active, width }) {
+function shortModel(model) {
+  const claude = /^claude-(opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?:-|$)/.exec(model || '');
+  return claude ? `${claude[1]} ${claude[2]}${claude[3] ? '.' + claude[3] : ''}` : model;
+}
+const modelInfo = (state, agent) => agent && state.modelInfoByAgent?.[agent.id];
+const modelDetails = (state, agent) => {
+  const info = modelInfo(state, agent);
+  return [...(info?.model ? [`Model: ${info.model}`] : []), ...(info?.effort ? [`Effort: ${info.effort}`] : [])];
+};
+function NamedRow({ state, row, active, width }) {
   const status = taskPresentation(row), { name, pane } = rowName(row);
   const provider = truncate(providerName(row.task?.agent.provider || row.agent?.provider), width < 50 ? 6 : 12);
+  const info = modelInfo(state, row.agent);
+  // The small pane keeps its existing name, status and folder hierarchy.
+  const fields = width >= 50 ? [shortModel(info?.model), info?.effort].filter(Boolean).join(' · ') : '';
   const detail = rowFolder(row) || elapsed(row.elapsedMs);
   const badge = TASK_LABELS[status] === 'Needs you' ? '! Needs you' : TASK_LABELS[status] || 'Starting';
   const metaWidth = Math.min(22, Math.floor(width / 4), width - 3 - displayWidth(badge) - displayWidth(provider) - 3 - 8);
   const metadata = detail && metaWidth >= 4 ? truncate(detail, metaWidth) : '';
-  const nameWidth = Math.max(3, width - 3 - displayWidth(badge) - displayWidth(provider) - 2 - (metadata ? displayWidth(metadata) + 1 : 0));
+  const originalNameWidth = Math.max(3, width - 3 - displayWidth(badge) - displayWidth(provider) - 2 - (metadata ? displayWidth(metadata) + 1 : 0));
+  const usedNameWidth = Math.min(originalNameWidth, displayWidth(name) + (pane ? displayWidth(pane) + 1 : 0));
+  const extraRoom = originalNameWidth - usedNameWidth;
+  const modelLabel = fields && extraRoom >= 5 ? ' · ' + truncate(fields, extraRoom - 3) : '';
+  const providerLabel = provider + modelLabel;
+  const nameWidth = originalNameWidth - displayWidth(modelLabel);
   const shownName = truncate(name, nameWidth);
   const paneWidth = Math.max(0, nameWidth - displayWidth(shownName) - 1);
   return h(Box, { width, height: 1, flexShrink: 0 },
     line(`${attention(row) ? '▌' : active ? '›' : status === 'working' ? '●' : '○'}${attention(row) && active ? '›' : ' '} `, { color: taskColor(status), bold: attention(row) }),
     h(Box, { width: nameWidth, flexShrink: 0 }, h(Text, { wrap: 'truncate-end' }, h(Text, { color: C.ink, bold: true }, shownName),
       pane && paneWidth > 0 ? h(Text, { color: C.faint }, ' ' + truncate(pane, paneWidth)) : null)),
-    line(' '), h(Badge, { status }), line(' ' + provider, { color: C.faint }),
+    line(' '), h(Badge, { status }), line(' ' + providerLabel, { color: C.faint }),
     metadata && line(' ' + metadata, { color: C.faint }));
 }
 export function listRows(state) {
@@ -135,7 +153,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
       if (row.type === 'empty') return h(Box, { key: `e-${row.provider}`, height: 1, flexShrink: 0 }, line('  No agents', { color: C.faint }));
       const active = selected?.id === row.agent.id;
       return h(Click, { key: `${row.type}-${row.agent.id}`, registry, id: `${row.type}-${row.agent.id}`, action: () => model.action('select', row.agent.id), width: '100%', height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
-        row.type === 'agent' ? h(NamedRow, { row: row.row, active, width: width - 4 }) : line(`  ${rowSupplement(row.row)}`, { color: attention(row.row) ? C.blocked : C.faint }));
+        row.type === 'agent' ? h(NamedRow, { state, row: row.row, active, width: width - 4 }) : line(`  ${rowSupplement(row.row)}`, { color: attention(row.row) ? C.blocked : C.faint }));
     }),
     h(Box, { flexGrow: 1 }),
     compactActions ? h(Box, { gap: 1, flexShrink: 0 },
@@ -157,7 +175,7 @@ function TaskList({ state, model, width, height, registry, offset = 0, compactAc
       if (item.type === 'project') return line(`${item.group.name} (${item.group.rows.length})`, { key: `group-${item.group.key}`, color: C.orange, bold: true });
       const row = item.row, active = row.id === state.selectedTaskId;
       return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('select-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
-        item.type === 'task' ? h(NamedRow, { row, active, width: width - 4 }) : line(`  ${rowSupplement(row)}`, { color: attention(row) ? C.blocked : C.faint }));
+        item.type === 'task' ? h(NamedRow, { state, row, active, width: width - 4 }) : line(`  ${rowSupplement(row)}`, { color: attention(row) ? C.blocked : C.faint }));
     }),
     !rows.length && line(state.projectsLoading ? 'Projects loading…' : state.query || state.filter !== 'all' ? 'No matching tasks.' : 'No tasks yet. /dispatch starts one.', { color: C.faint }),
     h(Box, { flexGrow: 1 }),
@@ -179,7 +197,7 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
   const workspaceArg = worktree && (/^[\w:.-]+$/.test(worktree.workspaceId) ? worktree.workspaceId : `'${worktree.workspaceId.replaceAll("'", "'\\''")}'`);
   const content = [task.inputTask, summaryLabel(task.summary), ...(task.summary?.at ? [`Checked: ${task.summary.at}`] : []), ...(task.summary?.message ? [task.summary.message] : []),
     `Project: ${task.project.name}`, `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Requested subfolder: ${task.subfolder || '(root)'}`,
-    `${providerName(task.agent.provider)} · ${elapsed(row.elapsedMs)}`, `Project root: ${task.project.root}`,
+    `${providerName(task.agent.provider)} · ${elapsed(row.elapsedMs)}`, ...modelDetails(state, row.agent), `Project root: ${task.project.root}`,
     `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Awaiting target'}`,
     `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
     ...(worktree ? [`Branch: ${worktree.branch}`, `Worktree path: ${worktree.path}`, 'Manual removal in current Herdr instance:', `herdr worktree remove --workspace ${workspaceArg}`] : []),
@@ -214,7 +232,7 @@ function Detail({ state, model, width, height, registry }) {
   if (row?.task) return h(OwnedTaskDetail, { state, model, width, height, registry, row });
   const disabled = Boolean(controlBlock(state)) || state.view === 'command';
   const { name, pane } = row ? rowName(row) : {};
-  const content = agent ? ['Task text unavailable for this agent.', ...(attention(row) ? [rowSupplement(row)] : []), providerName(agent.provider),
+  const content = agent ? ['Task text unavailable for this agent.', ...(attention(row) ? [rowSupplement(row)] : []), providerName(agent.provider), ...modelDetails(state, agent),
     agent.workspace?.path || 'Working directory unavailable', `Pane: ${agent.paneId}`, `Terminal: ${agent.terminalId || agent.id}`] : [];
   const lines = content.flatMap((text, index) => wrappedLines(text, Math.max(1, width - 4)).map(value => ({ value, color: index >= content.length - 2 ? C.faint : C.muted })));
   const capacity = Math.max(1, height - 5), offset = Math.min(state.detailOffset, Math.max(0, lines.length - capacity));
@@ -570,7 +588,7 @@ export function startTui({ monitor, controller, registry: projects, getConfig, r
   let outputError = null;
   const outputFailed = error => { outputError = error; };
   output.on('error', outputFailed);
-  const model = createTuiModel({ monitor, controller, registry: projects, getConfig, reloadConfig, addTrustedRepo, summarize, onQuit,
+  const model = createTuiModel({ monitor, controller, registry: projects, getConfig, reloadConfig, addTrustedRepo, summarize, onQuit, readModel: createModelReader(),
     acknowledgeNotice: async (token, signal) => {
       if (!instance || stopped || signal.aborted || output.destroyed || outputError) throw new Error('The terminal cannot display the required location notice.');
       await instance.waitUntilRenderFlush();

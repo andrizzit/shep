@@ -101,14 +101,14 @@ export function editText(value, cursor, input, key = {}, multiline = false) {
   return { value: chars.join(''), cursor };
 }
 
-export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, onQuit = () => {} }) {
+export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, readModel, now, onQuit = () => {} }) {
   let alive = true;
   let initialized = false;
   let submitting = false;
   let catalogGeneration = 0;
   const subscribers = new Set();
   let state = {
-    snapshot: monitor.getSnapshot(), view: 'board', boardView: 'tasks', selectedTaskId: null, selectedId: null, filter: 'all', query: '', command: '',
+    snapshot: monitor.getSnapshot(), modelInfoByAgent: {}, view: 'board', boardView: 'tasks', selectedTaskId: null, selectedId: null, filter: 'all', query: '', command: '',
     field: 'provider', cursor: { name: 0, subfolder: 0, prompt: 0, search: 0, command: 0, projectQuery: 0, folderPath: 0 },
     draft: { provider: '', name: '', projectKey: '', subfolder: '', prompt: '' },
     profiles: { providers: [], workspaces: [], defaultCwd: '', defaultWorkspaceId: '' },
@@ -130,7 +130,35 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   }
   change({});
   const session = createTaskSession({ controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, read: () => state, change, inform });
-  const unsubscribe = monitor.subscribe(snapshot => { change({ snapshot }); session.observe(snapshot); });
+  async function refreshModels(snapshot) {
+    if (!readModel || snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
+    await Promise.all(snapshot.agents.map(async agent => {
+      if (!agent.sessionId) return;
+      let info;
+      try { info = await readModel({ provider: agent.provider, sessionId: agent.sessionId }); }
+      catch { /* Optional local metadata never blocks the board. */ }
+      if (!alive) return;
+      const current = state.snapshot.agents.find(item => item.id === agent.id);
+      if (!current || current.provider !== agent.provider || current.sessionId !== agent.sessionId
+        || current.paneId !== agent.paneId || current.terminalId !== agent.terminalId) return;
+      const previous = state.modelInfoByAgent[agent.id];
+      if (previous?.model === info?.model && previous?.effort === info?.effort) return;
+      const modelInfoByAgent = { ...state.modelInfoByAgent };
+      if (info?.model || info?.effort) modelInfoByAgent[agent.id] = { ...(info.model ? { model: info.model } : {}), ...(info.effort ? { effort: info.effort } : {}) };
+      else delete modelInfoByAgent[agent.id];
+      change({ modelInfoByAgent });
+    }));
+  }
+  const unsubscribe = monitor.subscribe(snapshot => {
+    // Keep fields local to this terminal. The monitor and control identities
+    // remain the unchanged Herdr snapshot shared with the browser.
+    const modelInfoByAgent = Object.fromEntries(Object.entries(state.modelInfoByAgent).filter(([id]) => {
+      const before = state.snapshot.agents.find(agent => agent.id === id), after = snapshot.agents.find(agent => agent.id === id);
+      return before && after && before.provider === after.provider && before.sessionId === after.sessionId
+        && before.paneId === after.paneId && before.terminalId === after.terminalId;
+    }));
+    change({ snapshot, modelInfoByAgent }); session.observe(snapshot); void refreshModels(snapshot);
+  });
   const selected = () => state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.agent : state.snapshot.agents.find(agent => agent.id === state.selectedId);
   function targetBlock(target, closing = false) {
     const blocked = controlBlock(state);
@@ -477,7 +505,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     else if (key.escape) change({ query: '', filter: 'all' });
   }
   const modelKey = key;
-  const ready = Promise.all([refreshProfiles(), session.refresh()]);
+  const ready = Promise.all([refreshProfiles(), session.refresh(), refreshModels(state.snapshot)]);
   return { getSnapshot: () => state, subscribe: callback => { subscribers.add(callback); return () => subscribers.delete(callback); },
     action, key, paste: text => {
       if (state.busy) return;

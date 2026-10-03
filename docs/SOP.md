@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.7.1, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.8, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, explicit worktree placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -166,6 +166,12 @@ Press **g** to switch views. Tasks are grouped by project and show this run's di
 | Closed | The pane is confirmed gone; its task row disappears after about five seconds. |
 
 Rows lead with a bold name, status and dimmed provider. Needs you sorts first within its group, Working is bright and Done muted. A second line appears only for an attention reason or finished-task changes. Short differing folders replace repeated full paths; details keep the full path and show IDs at the bottom.
+
+Wide terminal rows also show the session's recorded model and reasoning effort for **Claude and Grok**, after the provider. Open details to see the full model ID and effort. At 40×15 these fields disappear from rows first; details keep them. Missing fields stay blank, and the browser snapshot is unchanged.
+
+Model details need a Herdr session integration. Install the matching integration yourself with `herdr integration install claude`, `herdr integration install codex` or `herdr integration install grok`, then start a new agent. Agents started before installation may lack a session ID. **Codex model details are deferred in this checkpoint:** its approved live probe still reported no session ID after trust was answered. Its existing dispatch and monitoring are unchanged.
+
+Shep uses only the exact Herdr session ID. It reads at most the final 64 KiB of `~/.claude/projects/*/<session-id>.jsonl` (assistant `message.model`/`effort`) or `~/.grok/sessions/*/<session-id>/chat_history.jsonl` (assistant `model_id`/`reasoning_effort`). Only those fields are extracted; conversation text is not retained. The reader caches file size and modification time and refreshes at most every ten seconds. A selection made between turns appears once recorded by the provider. There are no provider-folder writes or new history files. Unsafe IDs, symlinks, ambiguous sessions, unsupported formats or unreadable files produce no model details; Shep never uses a folder match or configuration default.
 
 The overview refreshes roughly every two seconds. Press **r** from the overview to request a refresh. Shep displays Herdr's state; it does not independently judge whether a coding task is correct.
 
@@ -345,7 +351,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.7.1.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.8.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 

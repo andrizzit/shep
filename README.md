@@ -7,7 +7,7 @@
 
 Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
 
-This branch provides **0.4.0-checkpoint.7.1**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
+This branch provides **0.4.0-checkpoint.8**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
@@ -24,6 +24,7 @@ For the full daily workflow, read the [Shep operating procedure](docs/SOP.md): d
 - Offers a project picker, command suggestions and command recall for the current run.
 - Groups tasks by project, shows Git change summaries and sends Herdr notifications when a task finishes or needs input.
 - Groups agents by provider, including Claude, Codex, Grok, Kiro, and additional types reported by Herdr.
+- Shows the session's recorded model and reasoning effort for linked Claude and Grok agents in the terminal.
 - Lets you select agents with arrow keys or a mouse, focus their real panes, send follow-ups and confirm closing them.
 - Hides confirmed closed task rows after about five seconds; clears failed rows on request without removing panes, files or worktrees.
 - Shows Starting, Working, Needs you, Done, Failed and briefly Closed in the terminal; the browser retains Herdr's native statuses.
@@ -64,7 +65,7 @@ The public default branch may still be 0.3.0 while this preview is unpushed. To 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.7.1.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.8.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -201,6 +202,22 @@ The terminal uses **Starting**, **Working**, **Needs you**, **Done**, **Failed**
 Status accuracy follows Herdr's detectors. The read-only browser retains its native Working, Needs input, Done, Idle and Unknown labels. Names lead each row, with Needs you first within its group, bright Working and muted Done. Attention also has a text marker under NO_COLOR. Rows show a short differing folder, not a repeated absolute path; task details retain full paths and dimmed IDs. Reading the overview does not mark work seen; focusing an agent does. If Herdr becomes unavailable, retained data is marked stale and controls are disabled.
 
 The scope is **one current Herdr instance**. Agents in other instances, other terminal applications, remote machines, or internal subagents that Herdr does not expose are not shown. Startup requires the host-provided socket and pane context; there is no manual session selector. `--session` is rejected and `SHEP_SESSION` is ignored.
+
+### Model and reasoning effort
+
+For **Claude and Grok**, wide terminal rows show the recorded model and effort after the provider, such as `Claude · opus 5.5 · high`. Details show the full model ID and effort. Compact rows omit these fields to preserve names and statuses. Missing data adds no placeholder. The read-only browser and `/api/snapshot` do not receive these fields.
+
+This needs the provider's Herdr integration and a session ID reported by an agent started **after** installation. Install the appropriate integration yourself:
+
+```sh
+herdr integration install claude
+herdr integration install codex
+herdr integration install grok
+```
+
+**Codex model details are deferred in this checkpoint:** the approved live probe did not report a session ID, even after its trust screen was answered. Codex dispatch and monitoring still work as before. Shep never guesses a session from its folder or configuration defaults.
+
+The terminal reads at most the last **64 KiB** of the exact session's local log: `~/.claude/projects/*/<session-id>.jsonl` (assistant `message.model` and `effort`), or `~/.grok/sessions/*/<session-id>/chat_history.jsonl` (assistant `model_id` and `reasoning_effort`). It extracts only those fields and caches them with file size and modification time, refreshing at most every ten seconds. Values describe the latest recorded response; a model selected between turns appears after the provider records it. Shep does not retain conversation text or write to provider folders. Invalid IDs, unsafe symlinks, ambiguous matches and unreadable or unsupported logs show nothing.
 
 ## Optional Herdr plugin shortcut
 
