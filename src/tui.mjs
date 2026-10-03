@@ -11,6 +11,7 @@ const C = TUI_COLORS;
 const dots = { working: '●', blocked: '●', done: '●', idle: '○', unknown: '·' };
 const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';
 const MOUSE_OFF = '\x1b[?1000l\x1b[?1006l';
+const DOCK_TAB_WARNING = 'Quit Shep with q before closing this tab — closing the tab also closes the docked agent.';
 const sprite = ['DD.....DD', 'DDDDWDDDD', 'DD.DWD.DD', 'DD.WWW.DD', '.DWW.WWD.', '.DDWWWDD.', '.DD...DD.', '.WW...WW.'];
 
 function truncate(value, width) {
@@ -408,6 +409,15 @@ function wrappedLines(value, width) {
   }
   return lines;
 }
+function dockWarningLines(width) {
+  const lines = [''];
+  for (const word of DOCK_TAB_WARNING.split(' ')) {
+    const current = lines.at(-1);
+    if (current && displayWidth(`${current} ${word}`) > width) lines.push(word);
+    else lines[lines.length - 1] = current ? `${current} ${word}` : word;
+  }
+  return lines;
+}
 function Decision({ state, model, width, height, registry }) {
   const decision = state.decision;
   const content = decision.kind === 'trust'
@@ -497,9 +507,10 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
     line('▟▀ᴥ▀▙  shep.', { color: C.orange, bold: true }),
     line('Enlarge this pane to at least 40 × 15.', { color: C.muted }),
     line('q / Ctrl+C quit; your agents keep running.', { color: C.muted }));
-  const compact = height < 25;
-  const short = height < 17;
   const dockListOnly = Boolean(state.dockedTarget) && ['board', 'search'].includes(state.view);
+  const compact = height < 25 || dockListOnly && width < 88;
+  const short = height < 17;
+  const warningLines = dockListOnly ? dockWarningLines(width) : [];
   const selectedRow = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId) : null;
   const selectedAgent = model.selected() ?? (selectedRow ? null : state.snapshot.agents.find(agent => agent.terminalId === state.dockedTarget?.terminalId));
   const selectedInfo = selectedAgent && state.modelInfoByAgent?.[selectedAgent.id];
@@ -510,8 +521,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const status = health(state);
   const agents = state.snapshot.agents || [];
   const headerHeight = short ? 1 : compact ? 2 : 4;
-  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up', 'rename'].includes(state.view) ? 0 : 3;
-  const footerHeight = short ? 1 : 2;
+  const toolbarHeight = dockListOnly && short ? 1 : compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up', 'rename'].includes(state.view) ? 0 : 3;
+  const footerHeight = dockListOnly ? 2 + warningLines.length : short ? 1 : 2;
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : 2;
   const suggestionRows = state.view === 'command' && state.suggestions.length ? Math.max(1, Math.min(5, state.suggestions.length, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - 5)) : 0;
   const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
@@ -558,8 +569,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         h(Button, { label: `g ${state.boardView === 'tasks' ? 'Agents' : 'Tasks'}`, registry, id: 'board-toggle', action: () => model.action('board-toggle') }),
         h(Button, { label: `f ${state.filter === 'all' ? 'All' : TASK_LABELS[state.filter]}`, registry, id: 'filter', disabled: state.view === 'command', action: () => model.action('filter') }),
         h(Click, { registry, id: 'search', action: () => model.action('search'), flexGrow: 1, minWidth: 0 }, line(`s ${state.query}${state.view === 'search' ? '▏' : state.query ? '' : 'Search'}`, { color: state.view === 'search' ? C.orange : C.muted }))),
-      line(`Default: ${defaults}`, { color: C.muted }),
-      h(Box, { height: 1, flexShrink: 0 },
+      !(dockListOnly && short) && line(`Default: ${defaults}`, { color: C.muted }),
+      !(dockListOnly && short) && h(Box, { height: 1, flexShrink: 0 },
         h(Click, { registry, id: 'command', action: () => model.action('command'), flexGrow: 1, minWidth: 0, backgroundColor: state.view === 'command' ? C.selected : C.panel }, line(`› ${commandDisplay}`, { color: state.view === 'command' ? C.ink : C.orange })),
         state.view === 'command' && width >= 70 && h(Button, { label: '↑', registry, id: 'recall-prev', action: () => model.action('command-recall', -1) }),
         state.view === 'command' && width >= 70 && h(Button, { label: '↓', registry, id: 'recall-next', action: () => model.action('command-recall', 1) }))),
@@ -580,7 +591,9 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         boardActions && clearable && h(Button, { label: 'c Clear', registry, id: 'clear', action: () => model.action('clear') }),
         boardActions && clearableTasks && h(Button, { label: 'C All', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),
         h(Box, { flexGrow: 1, minWidth: 0 }, line(footer, { color: C.muted }))),
-      !short && (dockListOnly ? line('Ctrl+B then h returns to Shep', { color: C.faint }) :
+      dockListOnly && line('Ctrl+B then h returns to Shep', { color: C.faint }),
+      ...warningLines.map((part, index) => line(part, { key: `dock-warning-${index}`, color: C.working })),
+      !short && !dockListOnly && (
         h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint })))));
 }
 

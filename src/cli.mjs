@@ -200,12 +200,14 @@ Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
         server.closeAllConnections();
         process.off('SIGINT', shutdown);
         process.off('SIGTERM', shutdown);
+        process.off('SIGHUP', shutdown);
       }
     })();
     return shutdownPromise;
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  process.on('SIGHUP', shutdown);
   try {
     if (options.terminal) {
       if (process.stdin.isTTY && process.stdout.isTTY) {

@@ -28,6 +28,7 @@ const KINDS = new Map(PROVIDERS.map(([id, name, executable]) => [id, { name, exe
 const UNCERTAIN = new Set(['timeout', 'unavailable', 'invalid_response', 'too_large', 'disposed', 'agent_start_transport_failed']);
 const NEEDS_INPUT = new Set(['agent_not_ready', 'agent_blocked']);
 const DOCK_MARKER = 'shep-dock:v1:';
+const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'pwsh', 'nu', 'elvish', 'xonsh']);
 const MESSAGES = Object.assign(Object.create(null), {
   outside_herdr: 'Agent controls require the current Herdr pane. Reopen Shep inside Herdr.',
   demo: 'Agent controls are unavailable in demo mode.',
@@ -56,7 +57,7 @@ const MESSAGES = Object.assign(Object.create(null), {
   changed_status: 'The agent status changed after selection. Review its current status before closing.',
   dock_pending: 'The selected agent is still starting. Wait until it is ready before docking.',
   dock_marker: 'A previous dock needs recovery. Restart Shep or inspect the marked pane in Herdr.',
-  dock_narrow: 'The Shep tab must be at least 120 columns wide to dock an agent.',
+  dock_narrow: 'Docking needs at least 60 columns for Shep and 80 for the agent. Enlarge Shep’s pane first.',
   dock_missing: 'The docked agent or its placeholder changed. Inspect Herdr before trying again.',
   not_found: 'Herdr was not found. Check HERDR_BIN_PATH.',
   timeout: 'Herdr did not finish the request in time.',
@@ -79,6 +80,8 @@ function parseDockMarker(label) {
   try {
     const value = JSON.parse(Buffer.from(label.slice(DOCK_MARKER.length), 'base64url').toString('utf8'));
     if (value?.version !== 1 || !['ownTerminalId', 'agentTerminalId', 'provider', 'originTabId', 'originWorkspaceId'].every(key => present(value[key]))
+      || (value.shellPid !== undefined && (!Number.isSafeInteger(value.shellPid) || value.shellPid <= 0))
+      || ['shellName', 'shellArgv0', 'shellCommand'].some(key => value[key] !== undefined && !present(value[key]))
       || !(value.agentName === null || present(value.agentName)) || !(value.sessionId === null || present(value.sessionId))) return null;
     return value;
   } catch { return null; }
@@ -151,7 +154,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   const trusted = root => (getConfig()?.worktrees?.trustedRepos ?? []).includes(root);
   const jobKey = request => JSON.stringify([request.taskId, request.attemptId]);
   const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove', 'rename', 'move', 'swap'].includes(argv[1]);
-  let dockState = null, dockBusy = false;
+  let dockState = null, dockBusy = false, dockMarkersChecked = false;
 
 
   function assertContext() {
@@ -446,17 +449,85 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     return pane;
   }
 
-  async function closeDockPlaceholder(state) {
-    const { snapshot } = await fresh();
+  async function placeholderProcess(paneId) {
+    const info = (await invoke(['pane', 'process-info', '--pane', paneId])).result?.process_info;
+    if (!info || info.pane_id !== paneId || !Array.isArray(info.foreground_processes)) fail('invalid_response');
+    return info;
+  }
+
+  const executableName = value => typeof value === 'string' ? value.replace(/^-/, '').split('/').at(-1) : null;
+  function createdShell(info) {
+    const process = info.foreground_processes.find(item => item?.pid === info.shell_pid);
+    const shell = { shellPid: info.shell_pid, shellName: process?.name,
+      shellArgv0: process?.argv0, shellCommand: process?.argv?.[0] };
+    const name = executableName(shell.shellName);
+    const expected = executableName(pinned.env.SHELL);
+    if (!Number.isSafeInteger(shell.shellPid) || shell.shellPid <= 0 || !name
+      || name !== executableName(shell.shellArgv0) || name !== executableName(shell.shellCommand)
+      || (expected ? name !== expected : !SHELL_NAMES.has(name))) fail('invalid_response');
+    return shell;
+  }
+
+  function shellOnly(info, shell) {
+    const process = info.foreground_processes[0];
+    return Number.isSafeInteger(shell?.shellPid) && shell.shellPid > 0
+      && ['shellName', 'shellArgv0', 'shellCommand'].every(key => present(shell[key]))
+      && info.shell_pid === shell.shellPid && info.foreground_process_group_id === shell.shellPid
+      && info.foreground_processes.length === 1 && process?.pid === shell.shellPid
+      && process.name === shell.shellName && process.argv0 === shell.shellArgv0
+      && process.argv?.[0] === shell.shellCommand;
+  }
+
+  async function readyDockShell(placeholder, source) {
+    let shell = null, shellPid = null;
+    for (let attempt = 0; attempt < 21; attempt++) {
+      const pane = await paneGet(placeholder.pane_id);
+      if (pane.terminal_id !== placeholder.terminal_id || pane.tab_id !== source.tab_id
+        || pane.workspace_id !== source.workspace_id || present(pane.label)
+        || present(pane.agent) || pane.launch_pending === true) fail('dock_missing');
+      const info = await placeholderProcess(placeholder.pane_id);
+      if (Number.isSafeInteger(info.shell_pid) && info.shell_pid > 0) {
+        if (shellPid !== null && shellPid !== info.shell_pid) fail('invalid_response');
+        shellPid = info.shell_pid;
+      } else if (shellPid !== null || info.foreground_processes.length) fail('invalid_response');
+      if (info.foreground_processes.length && info.foreground_process_group_id !== shellPid) fail('invalid_response');
+      const process = info.foreground_processes.find(item => item?.pid === shellPid);
+      if (process) {
+        if (!shell) shell = createdShell(info);
+        else if (process.name !== shell.shellName || process.argv0 !== shell.shellArgv0
+          || process.argv?.[0] !== shell.shellCommand) fail('invalid_response');
+      }
+      if (shell && shellOnly(info, shell)) return shell;
+      if (attempt < 20) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    fail('timeout');
+  }
+
+  async function checkedPlaceholder(state, snapshot) {
     const pane = snapshot.panes.find(item => item.pane_id === state.placeholder.paneId
       && item.terminal_id === state.placeholder.terminalId);
     if (!pane || snapshot.agents.some(agent => agent.pane_id === pane.pane_id || agent.terminal_id === pane.terminal_id)) fail('dock_missing');
     const current = await paneGet(pane.pane_id);
     if (current.terminal_id !== state.placeholder.terminalId || current.label !== state.marker
-      || present(current.agent) || current.launch_pending === true) fail('dock_missing');
+      || current.workspace_id !== state.origin.workspaceId || present(current.agent) || current.launch_pending === true) fail('dock_missing');
+    state.placeholder.paneId = pane.pane_id;
+    return pane;
+  }
+
+  async function closeDockPlaceholder(state) {
+    const { snapshot } = await fresh();
+    const pane = await checkedPlaceholder(state, snapshot);
+    const info = await placeholderProcess(pane.pane_id);
+    if (!shellOnly(info, state.placeholder)) {
+      await invoke(['pane', 'rename', pane.pane_id, 'Shell'], { allowDisconnected: true });
+      const afterRename = await paneGet(pane.pane_id);
+      if (afterRename.terminal_id !== state.placeholder.terminalId || afterRename.label !== 'Shell') fail('dock_missing');
+      return false;
+    }
     await invoke(['pane', 'close', pane.pane_id], { allowDisconnected: true });
     const after = await fresh();
     if (after.snapshot.panes.some(item => item.terminal_id === state.placeholder.terminalId)) fail('invalid_response');
+    return true;
   }
 
   async function dockMarkers(snapshot) {
@@ -489,39 +560,55 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     if (!source) fail('changed_target');
     reserve(source.workspace_id);
     if (snapshot.panes.some(pane => pane.pane_id === target.paneId && String(pane.label ?? '').startsWith(DOCK_MARKER))) fail('invalid_target');
-    const markers = await dockMarkers(snapshot);
-    if (markers.some(({ marker }) => !marker)) fail('dock_marker');
-    if (markers.length) fail('dock_marker');
+    if (!dockMarkersChecked) {
+      const markers = await dockMarkers(snapshot);
+      if (markers.length) fail('dock_marker');
+      dockMarkersChecked = true;
+    }
     const { agent } = await checkedAgent(target, false, true);
     if (agent.launch_pending === true || snapshot.agents.find(item => item.pane_id === target.paneId)?.launch_pending === true) fail('dock_pending');
     const layout = (await invoke(['pane', 'layout', '--pane', own.pane_id])).result?.layout;
     if (layout?.workspace_id !== own.workspace_id || layout?.tab_id !== own.tab_id
       || !layout.panes?.some(item => item.pane_id === own.pane_id)) fail('dock_narrow');
-    const paneWidths = layout?.panes?.map(item => Number(item.rect?.x ?? 0) + Number(item.rect?.width)).filter(Number.isFinite) ?? [];
-    const columns = layout?.columns ?? layout?.cols ?? layout?.size?.columns ?? layout?.size?.width ?? Math.max(0, ...paneWidths);
-    if (layout?.zoomed || !Number.isFinite(columns) || columns < 120) fail('dock_narrow');
+    const ownRect = layout.panes.find(item => item.pane_id === own.pane_id)?.rect;
+    const columns = ownRect?.width;
+    if (layout?.zoomed || !Number.isSafeInteger(columns) || columns < 140) fail('dock_narrow');
+    const shepRatio = Math.max(0.35, 60 / columns);
+    if (Math.round(columns * shepRatio) < 60 || columns - Math.round(columns * shepRatio) < 80) fail('dock_narrow');
     const captured = { ...target, agentName: Object.hasOwn(target, 'agentName') ? target.agentName : target.name ?? null };
-    const marker = dockLabel({ ownTerminalId: own.terminal_id, agentTerminalId: target.terminalId,
-      provider: target.provider, agentName: captured.agentName, sessionId: trustedSession(target.provider, target.sessionId) ?? null,
-      originTabId: source.tab_id, originWorkspaceId: source.workspace_id });
     const before = await checkedAgent(captured, false, true);
     if (before.snapshot.panes.find(pane => pane.pane_id === source.pane_id)?.terminal_id !== source.terminal_id) fail('changed_target');
-    let placeholder, moveAttempted = false;
+    let placeholder, placeholderShell, shellReady = false, moveAttempted = false;
     try {
       const result = (await invoke(['pane', 'split', '--pane', source.pane_id, '--direction', 'right', '--ratio', '0.5',
         ...(isAbsolute(source.foreground_cwd ?? source.cwd ?? '') ? ['--cwd', source.foreground_cwd ?? source.cwd] : []), '--no-focus'])).result;
       placeholder = result?.pane;
       if (!present(placeholder?.pane_id) || !present(placeholder?.terminal_id) || placeholder.tab_id !== source.tab_id
         || placeholder.workspace_id !== source.workspace_id || placeholder.pane_id === source.pane_id) fail('invalid_response');
+      placeholderShell = await readyDockShell(placeholder, source);
+      shellReady = true;
+      const beforeMarker = (await fresh()).snapshot;
+      const matchingPane = beforeMarker.panes.find(pane => pane.pane_id === placeholder.pane_id
+        && pane.terminal_id === placeholder.terminal_id && pane.tab_id === source.tab_id
+        && pane.workspace_id === source.workspace_id);
+      if (!matchingPane || beforeMarker.agents.some(agent => agent.pane_id === placeholder.pane_id
+        || agent.terminal_id === placeholder.terminal_id)) fail('dock_missing');
+      const exactPlaceholder = await paneGet(placeholder.pane_id);
+      if (exactPlaceholder.terminal_id !== placeholder.terminal_id || exactPlaceholder.tab_id !== source.tab_id
+        || exactPlaceholder.workspace_id !== source.workspace_id || present(exactPlaceholder.label)
+        || present(exactPlaceholder.agent) || exactPlaceholder.launch_pending === true) fail('dock_missing');
+      const marker = dockLabel({ ownTerminalId: own.terminal_id, agentTerminalId: target.terminalId,
+        provider: target.provider, agentName: captured.agentName, sessionId: trustedSession(target.provider, target.sessionId) ?? null,
+        originTabId: source.tab_id, originWorkspaceId: source.workspace_id, ...placeholderShell });
       await invoke(['pane', 'rename', placeholder.pane_id, marker]);
       const marked = await paneGet(placeholder.pane_id);
       if (marked.terminal_id !== placeholder.terminal_id || marked.label !== marker) fail('invalid_response');
       dockState = { target: captured, origin: { tabId: source.tab_id, workspaceId: source.workspace_id },
-        placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id }, marker, phase: 'preparing' };
+        placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id, ...placeholderShell }, marker, phase: 'preparing' };
       await checkedAgent(captured, false, true);
       moveAttempted = true;
       const moved = (await invoke(['pane', 'move', source.pane_id, '--tab', own.tab_id, '--split', 'right',
-        '--target-pane', own.pane_id, '--ratio', '0.7', '--no-focus'])).result?.move_result;
+        '--target-pane', own.pane_id, '--ratio', String(shepRatio), '--no-focus'])).result?.move_result;
       if (moved?.changed !== true || moved?.pane?.terminal_id !== target.terminalId) fail('invalid_response');
       const verified = await movedAgent(captured, target.terminalId, own.workspace_id, own.tab_id);
       if (snapshot.focused_pane_id === own.pane_id && [moved.focused_pane_id, moved.target_layout?.focused_pane_id,
@@ -532,15 +619,18 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       dockState = { ...dockState, target: verified.target, phase: 'docked' };
       return outcome('docked', 'Selected agent docked beside Shep.', { target: structuredClone(verified.target) });
     } catch (error) {
+      dockMarkersChecked = false;
       if (dockState && moveAttempted) dockState.phase = 'uncertain';
-      if (!dockState && placeholder?.pane_id && placeholder?.terminal_id) {
+      if (!dockState && shellReady && placeholder?.pane_id && placeholder?.terminal_id) {
         try {
           const current = (await fresh()).snapshot;
           const pane = current.panes.find(item => item.pane_id === placeholder.pane_id && item.terminal_id === placeholder.terminal_id
             && item.tab_id === source.tab_id && item.workspace_id === source.workspace_id);
           if (pane && !current.agents.some(item => item.pane_id === pane.pane_id)) {
             const exact = await paneGet(pane.pane_id);
-            if (exact.terminal_id === placeholder.terminal_id && !present(exact.agent) && exact.launch_pending !== true)
+            const process = await placeholderProcess(pane.pane_id);
+            if (exact.terminal_id === placeholder.terminal_id && !present(exact.agent) && exact.launch_pending !== true
+              && shellOnly(process, placeholderShell))
               await invoke(['pane', 'close', pane.pane_id], { allowDisconnected: true });
           }
         } catch { /* An uncertain created pane is left for inspection. */ }
@@ -558,19 +648,16 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     reserve(own.workspace_id, state.origin.workspaceId);
     const candidate = snapshot.panes.filter(pane => pane.terminal_id === state.target.terminalId);
     if (candidate.length > 1) fail('dock_missing');
+    const placeholderById = snapshot.panes.find(pane => pane.pane_id === state.placeholder.paneId);
+    if (placeholderById && placeholderById.terminal_id !== state.placeholder.terminalId) fail('dock_missing');
     const placeholder = snapshot.panes.find(pane => pane.terminal_id === state.placeholder.terminalId);
-    if (placeholder) {
-      const current = await paneGet(placeholder.pane_id);
-      if (current.label !== state.marker || current.terminal_id !== state.placeholder.terminalId
-        || current.workspace_id !== state.origin.workspaceId || present(current.agent) || current.launch_pending === true
-        || snapshot.agents.some(agent => agent.pane_id === placeholder.pane_id || agent.terminal_id === placeholder.terminal_id)) fail('dock_missing');
-      state.placeholder.paneId = placeholder.pane_id;
-    }
+    if (placeholder) await checkedPlaceholder(state, snapshot);
     if (!candidate.length) {
       if (!placeholder) fail('dock_missing');
-      await closeDockPlaceholder(state);
+      const closed = await closeDockPlaceholder(state);
       dockState = null;
-      return outcome('undocked', 'The closed agent dock was cleared.');
+      dockMarkersChecked = true;
+      return outcome('undocked', closed ? 'The closed agent dock was cleared.' : 'Placeholder kept (busy or unverified); marker removed.');
     }
     const current = candidate[0];
     const verified = await movedAgent(state.target, state.target.terminalId, current.workspace_id, current.tab_id);
@@ -578,14 +665,16 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       && !(state.phase === 'restoring' && current.workspace_id === state.origin.workspaceId)) fail('dock_missing');
     if (state.phase === 'preparing' && current.tab_id === state.origin.tabId) {
       if (!placeholder) fail('dock_missing');
-      await closeDockPlaceholder(state);
+      const closed = await closeDockPlaceholder(state);
       dockState = null;
-      return outcome('undocked', 'Unfinished dock cleared.', { target: verified.target });
+      dockMarkersChecked = true;
+      return outcome('undocked', closed ? 'Unfinished dock cleared.' : 'Agent home; placeholder kept (busy or unverified).', { target: verified.target });
     }
     if (state.phase === 'restoring') {
-      if (placeholder) await closeDockPlaceholder(state);
+      const closed = placeholder ? await closeDockPlaceholder(state) : true;
       dockState = null;
-      return outcome('undocked', 'Agent returned to its original workspace.', { target: verified.target });
+      dockMarkersChecked = true;
+      return outcome('undocked', closed ? 'Agent returned to its original workspace.' : 'Agent restored; placeholder kept (busy or unverified).', { target: verified.target });
     }
     const originWorkspace = snapshot.workspaces.some(workspace => workspace.workspace_id === state.origin.workspaceId);
     const originTab = originWorkspace && placeholder && snapshot.tabs?.some(tab => tab.tab_id === state.origin.tabId && tab.workspace_id === state.origin.workspaceId);
@@ -601,11 +690,10 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     state.target = restored.target;
     state.origin = { tabId: restored.pane.tab_id, workspaceId: restored.pane.workspace_id };
     state.phase = 'restoring';
-    if (placeholder) {
-      await closeDockPlaceholder(state);
-    }
+    const closed = placeholder ? await closeDockPlaceholder(state) : true;
     dockState = null;
-    return outcome('undocked', 'Agent returned to its original tab.', { target: restored.target });
+    dockMarkersChecked = true;
+    return outcome('undocked', closed ? 'Agent returned to its original tab.' : 'Agent restored; placeholder kept (busy or unverified).', { target: restored.target });
   }
 
   async function dock({ target } = {}) {
@@ -633,7 +721,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   async function undock() {
     return dockOperation(async reserve => {
       try { return await undockCore(reserve); }
-      catch (error) { return uncertainDock('Undock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
+      catch (error) { dockMarkersChecked = false; return uncertainDock('Undock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
         { ...(dockState?.target ? { target: structuredClone(dockState.target) } : {}) }); }
     }, { requireLive: false });
   }
@@ -647,7 +735,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       if (markers.length > 1) return outcome('failed', 'Multiple dock placeholders need manual inspection in Herdr.', { code: 'dock_marker' });
       const marked = markers.filter(({ marker }) => marker?.ownTerminalId === own.terminal_id);
       if (markers.length && !marked.length) return outcome('failed', 'A dock placeholder belongs to another Shep pane. Inspect Herdr before docking.', { code: 'dock_marker' });
-      if (!marked.length) return outcome('recovered', 'No leftover dock was found.');
+      if (!marked.length) { dockMarkersChecked = true; return outcome('recovered', 'No leftover dock was found.'); }
       const { pane: placeholder, marker } = marked[0];
       const agentPane = snapshot.panes.filter(pane => pane.terminal_id === marker.agentTerminalId);
       if (agentPane.length > 1 || agentPane[0]?.pane_id === own.pane_id)
@@ -656,23 +744,28 @@ export function createController({ context, monitor, mode = 'live', delivery = '
         agentName: marker.agentName, sessionId: marker.sessionId };
       try {
         dockState = { target, origin: { tabId: marker.originTabId, workspaceId: marker.originWorkspaceId },
-          placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id }, marker: placeholder.label, phase: 'docked' };
+          placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id,
+            shellPid: marker.shellPid, shellName: marker.shellName, shellArgv0: marker.shellArgv0, shellCommand: marker.shellCommand },
+          marker: placeholder.label, phase: 'docked' };
         if (!agentPane.length) {
-          await closeDockPlaceholder(dockState);
+          const closed = await closeDockPlaceholder(dockState);
           dockState = null;
-          return outcome('recovered', 'Cleared a leftover dock for a closed agent.');
+          dockMarkersChecked = true;
+          return outcome('recovered', closed ? 'Cleared a leftover dock for a closed agent.' : 'Placeholder kept (busy or unverified); marker removed.');
         }
         if (agentPane[0].workspace_id === marker.originWorkspaceId && agentPane[0].tab_id === marker.originTabId) {
           await movedAgent(target, target.terminalId, marker.originWorkspaceId, marker.originTabId);
-          await closeDockPlaceholder(dockState);
+          const closed = await closeDockPlaceholder(dockState);
           dockState = null;
-          return outcome('recovered', 'Cleared a leftover dock after the agent returned.', { target });
+          dockMarkersChecked = true;
+          return outcome('recovered', closed ? 'Cleared a leftover dock after the agent returned.' : 'Agent restored; placeholder kept (busy or unverified).', { target });
         }
         if (agentPane[0].tab_id !== own.tab_id || agentPane[0].workspace_id !== own.workspace_id) fail('dock_missing');
         await movedAgent(target, target.terminalId, own.workspace_id, own.tab_id);
         const result = await undockCore(reserve);
-        return result.ok ? outcome('recovered', 'Recovered the agent from the previous dock.', { target: result.target }) : result;
+        return result.ok ? outcome('recovered', result.message.includes('placeholder kept') ? result.message : 'Recovered the agent from the previous dock.', { target: result.target }) : result;
       } catch (error) {
+        dockMarkersChecked = false;
         return uncertainDock('Leftover dock could not be restored safely. Inspect Herdr.', error);
       }
     }, { requireLive: false });

@@ -5,7 +5,7 @@ import { getHerdrContext } from '../src/herdr.mjs';
 
 const clone = value => structuredClone(value);
 
-function fixture({ width = 120, layoutMismatch = false, pending = false, provider = 'claude', name = 'synthetic', sessionId = 'session-a' } = {}) {
+function fixture({ width = 172, layoutMismatch = false, pending = false, provider = 'claude', name = 'synthetic', sessionId = 'session-a' } = {}) {
   const snapshot = {
     version: '0.9.1', focused_pane_id: 'w1:p1',
     workspaces: [
@@ -46,6 +46,10 @@ function fixture({ width = 120, layoutMismatch = false, pending = false, provide
           if (type === 'pane' && action === 'layout') return { result: { layout: { workspace_id: layoutMismatch ? 'w2' : 'w1', tab_id: 'w1:t1', zoomed: false,
             panes: [{ pane_id: 'w1:p1', rect: { x: 0, width, height: 40 } }] } } };
           if (type === 'pane' && action === 'get') return { result: { pane: clone(snapshot.panes.find(p => p.pane_id === argv[2])) } };
+          if (type === 'pane' && action === 'process-info') return { result: { process_info: {
+            pane_id: flag(argv, '--pane'), shell_pid: 40002, foreground_process_group_id: 40002,
+            foreground_processes: [{ pid: 40002, name: 'zsh', argv0: 'zsh', argv: ['-zsh'] }],
+          } } };
           if (type === 'agent' && action === 'get') return { result: { agent: clone(snapshot.agents.find(a => a.pane_id === argv[2])) } };
           if (type === 'pane' && action === 'split') {
             const source = snapshot.panes.find(p => p.pane_id === flag(argv, '--pane'));
@@ -121,7 +125,7 @@ test('dock moves the exact live pane beside Shep, keeps process/focus, and resto
 
 test('dock refuses narrow tab, own pane, pending agent and changed identity without a mutation', async t => {
   for (const condition of ['narrow', 'wrong-layout', 'own', 'pending', 'changed-name', 'changed-session']) {
-    const f = fixture({ width: condition === 'narrow' ? 119 : 120, layoutMismatch: condition === 'wrong-layout', pending: condition === 'pending' });
+    const f = fixture({ width: condition === 'narrow' ? 139 : 172, layoutMismatch: condition === 'wrong-layout', pending: condition === 'pending' });
     const controller = f.createController(); t.after(controller.dispose);
     if (condition === 'own') { f.target.paneId = 'w1:p1'; f.target.terminalId = 'own-terminal'; }
     if (condition === 'changed-name') f.snapshot.agents[0].name = 'replacement';
