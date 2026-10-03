@@ -761,7 +761,15 @@ test('orchestrator QA: installed NO_COLOR layout fits exact terminal width and c
   delete fixture.env.FORCE_COLOR;
   const pty = await startInstalledPty(t, fixture, { columns: 123, rows: 35 });
   await enterAgents(pty);
-  await waitFor(() => pty.screen().includes('alpha-fixture') && pty.screen().includes('Task text unavailable for this agent.'), 'Desktop detail panel did not render');
+  await waitFor(() => {
+    const screen = pty.screen();
+    const detail = screen.split('\n').map(row => {
+      const start = row.indexOf('││'), end = row.lastIndexOf('│');
+      // Remove the fixed panel borders/padding, keeping spaces in wrapped text.
+      return start < 0 ? '' : row.slice(start + 3, end - 1);
+    }).join('');
+    return screen.includes('alpha-fixture') && detail.includes('Task text unavailable for this agent.');
+  }, 'Desktop detail panel did not render');
   const desktop = pty.screen().split('\n');
   const desktopTop = desktop.find(row => row.includes('╭'));
   assert.equal(desktopTop?.slice(-2), '╮ ', 'Desktop right border must fit with one reserved physical column');
