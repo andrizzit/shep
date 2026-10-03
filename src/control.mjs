@@ -551,7 +551,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     return { snapshot, pane, target: updated, own };
   }
 
-  async function dockCore(target, reserve) {
+  async function dockCore(target, reserve, switchFrom = null) {
     if (!present(target?.provider)) fail('invalid_target');
     const { snapshot, own } = await fresh();
     reserve(own.workspace_id);
@@ -572,13 +572,22 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       || !layout.panes?.some(item => item.pane_id === own.pane_id)) fail('dock_narrow');
     const ownRect = layout.panes.find(item => item.pane_id === own.pane_id)?.rect;
     const columns = ownRect?.width;
-    if (layout?.zoomed || !Number.isSafeInteger(columns) || columns < 140) fail('dock_narrow');
-    const shepRatio = Math.max(0.35, 60 / columns);
-    if (Math.round(columns * shepRatio) < 60 || columns - Math.round(columns * shepRatio) < 80) fail('dock_narrow');
+    const previousRect = switchFrom && layout.panes.find(item => item.pane_id === switchFrom.target.paneId)?.rect;
+    if (layout?.zoomed || !Number.isSafeInteger(columns)
+      || (switchFrom ? columns < 60 || !Number.isSafeInteger(previousRect?.width) || previousRect.width < 160 : columns < 140)) fail('dock_narrow');
+    const shepRatio = switchFrom ? 0.5 : Math.max(0.35, 60 / columns);
+    if (!switchFrom && (Math.round(columns * shepRatio) < 60 || columns - Math.round(columns * shepRatio) < 80)) fail('dock_narrow');
+    if (switchFrom) {
+      await movedAgent(switchFrom.target, switchFrom.target.terminalId, own.workspace_id, own.tab_id);
+      const previousPlaceholder = snapshot.panes.find(pane => pane.terminal_id === switchFrom.placeholder.terminalId);
+      if (snapshot.panes.some(pane => pane.pane_id === switchFrom.placeholder.paneId
+        && pane.terminal_id !== switchFrom.placeholder.terminalId)) fail('dock_missing');
+      if (previousPlaceholder) await checkedPlaceholder(switchFrom, snapshot);
+    }
     const captured = { ...target, agentName: Object.hasOwn(target, 'agentName') ? target.agentName : target.name ?? null };
     const before = await checkedAgent(captured, false, true);
     if (before.snapshot.panes.find(pane => pane.pane_id === source.pane_id)?.terminal_id !== source.terminal_id) fail('changed_target');
-    let placeholder, placeholderShell, shellReady = false, moveAttempted = false;
+    let placeholder, placeholderShell, newState, shellReady = false, moveAttempted = false, moveVerified = false;
     try {
       const result = (await invoke(['pane', 'split', '--pane', source.pane_id, '--direction', 'right', '--ratio', '0.5',
         ...(isAbsolute(source.foreground_cwd ?? source.cwd ?? '') ? ['--cwd', source.foreground_cwd ?? source.cwd] : []), '--no-focus'])).result;
@@ -603,25 +612,48 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       await invoke(['pane', 'rename', placeholder.pane_id, marker]);
       const marked = await paneGet(placeholder.pane_id);
       if (marked.terminal_id !== placeholder.terminal_id || marked.label !== marker) fail('invalid_response');
-      dockState = { target: captured, origin: { tabId: source.tab_id, workspaceId: source.workspace_id },
+      newState = { target: captured, origin: { tabId: source.tab_id, workspaceId: source.workspace_id },
         placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id, ...placeholderShell }, marker, phase: 'preparing' };
+      if (!switchFrom) dockState = newState;
       await checkedAgent(captured, false, true);
+      if (switchFrom) await movedAgent(switchFrom.target, switchFrom.target.terminalId, own.workspace_id, own.tab_id);
       moveAttempted = true;
       const moved = (await invoke(['pane', 'move', source.pane_id, '--tab', own.tab_id, '--split', 'right',
-        '--target-pane', own.pane_id, '--ratio', String(shepRatio), '--no-focus'])).result?.move_result;
+        '--target-pane', switchFrom?.target.paneId ?? own.pane_id, '--ratio', String(shepRatio), '--no-focus'])).result?.move_result;
       if (moved?.changed !== true || moved?.pane?.terminal_id !== target.terminalId) fail('invalid_response');
       const verified = await movedAgent(captured, target.terminalId, own.workspace_id, own.tab_id);
+      moveVerified = true;
       if (snapshot.focused_pane_id === own.pane_id && [moved.focused_pane_id, moved.target_layout?.focused_pane_id,
         verified.snapshot.focused_pane_id].some(id => present(id) && id !== own.pane_id)) fail('invalid_response');
       const place = await paneGet(placeholder.pane_id);
       if (place.terminal_id !== placeholder.terminal_id || place.label !== marker || place.tab_id !== source.tab_id
         || place.workspace_id !== source.workspace_id) fail('dock_missing');
-      dockState = { ...dockState, target: verified.target, phase: 'docked' };
+      newState = { ...newState, target: verified.target, phase: 'docked' };
+      if (switchFrom) {
+        const restored = await undockCore(reserve);
+        if (!restored.ok) fail('dock_missing');
+        dockState = newState;
+        return outcome('docked', restored.message.includes('placeholder kept') ? restored.message : 'Selected agent docked beside Shep.',
+          { target: structuredClone(verified.target), restoredTarget: restored.target });
+      }
+      dockState = newState;
       return outcome('docked', 'Selected agent docked beside Shep.', { target: structuredClone(verified.target) });
     } catch (error) {
       dockMarkersChecked = false;
-      if (dockState && moveAttempted) dockState.phase = 'uncertain';
-      if (!dockState && shellReady && placeholder?.pane_id && placeholder?.terminal_id) {
+      if (switchFrom && moveVerified) {
+        const previous = dockState;
+        try {
+          dockState = newState;
+          const restored = await undockCore(reserve);
+          if (!restored.ok) fail('dock_missing');
+          dockState = previous;
+          if (dockState) dockState.phase = 'uncertain';
+        } catch {
+          dockState = previous;
+          if (dockState) dockState.phase = 'uncertain';
+        }
+      } else if (dockState && moveAttempted) dockState.phase = 'uncertain';
+      if ((!dockState || switchFrom && !moveAttempted) && shellReady && placeholder?.pane_id && placeholder?.terminal_id) {
         try {
           const current = (await fresh()).snapshot;
           const pane = current.panes.find(item => item.pane_id === placeholder.pane_id && item.terminal_id === placeholder.terminal_id
@@ -638,6 +670,21 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       return uncertainDock('Dock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
         { target: dockState?.target ?? captured });
     }
+  }
+
+  async function canSwitchWithoutRemovingPane(state, target) {
+    if (state.phase !== 'docked') return false;
+    const { snapshot, own } = await fresh();
+    const previous = snapshot.panes.find(pane => pane.terminal_id === state.target.terminalId);
+    const next = snapshot.panes.find(pane => pane.pane_id === target?.paneId && pane.terminal_id === target?.terminalId);
+    if (!previous || previous.pane_id !== state.target.paneId || previous.tab_id !== own.tab_id
+      || previous.workspace_id !== own.workspace_id || !next || next.tab_id === own.tab_id) return false;
+    const layout = (await invoke(['pane', 'layout', '--pane', own.pane_id])).result?.layout;
+    const shepWidth = layout?.panes?.find(pane => pane.pane_id === own.pane_id)?.rect?.width;
+    const agentWidth = layout?.panes?.find(pane => pane.pane_id === previous.pane_id)?.rect?.width;
+    return layout?.tab_id === own.tab_id && layout?.workspace_id === own.workspace_id && !layout.zoomed
+      && Number.isSafeInteger(shepWidth) && shepWidth >= 60
+      && Number.isSafeInteger(agentWidth) && agentWidth >= 160;
   }
 
   async function undockCore(reserve) {
@@ -678,11 +725,12 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     }
     const originWorkspace = snapshot.workspaces.some(workspace => workspace.workspace_id === state.origin.workspaceId);
     const originTab = originWorkspace && placeholder && snapshot.tabs?.some(tab => tab.tab_id === state.origin.tabId && tab.workspace_id === state.origin.workspaceId);
+    const restoredLabel = safeText(state.target.agentName || 'Restored agent');
     const command = originTab
       ? ['pane', 'move', current.pane_id, '--tab', state.origin.tabId, '--split', 'right', '--target-pane', placeholder.pane_id, '--ratio', '0.5', '--no-focus']
       : originWorkspace
-        ? ['pane', 'move', current.pane_id, '--new-tab', '--workspace', state.origin.workspaceId, '--label', 'Restored agent', '--no-focus']
-        : ['pane', 'move', current.pane_id, '--new-workspace', '--label', 'Restored origin', '--tab-label', 'Restored agent', '--no-focus'];
+        ? ['pane', 'move', current.pane_id, '--new-tab', '--workspace', state.origin.workspaceId, '--label', restoredLabel, '--no-focus']
+        : ['pane', 'move', current.pane_id, '--new-workspace', '--label', 'Restored origin', '--tab-label', restoredLabel, '--no-focus'];
     const moved = (await invoke(command, { allowDisconnected: true })).result?.move_result;
     if (moved?.changed !== true || moved?.pane?.terminal_id !== state.target.terminalId) fail('invalid_response');
     const restored = await movedAgent(verified.target, state.target.terminalId,
@@ -707,6 +755,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
           if (!sessionMatches(target.provider, target.sessionId, dockState.target.sessionId, true)) fail('changed_target');
           return outcome('docked', 'Selected agent is already docked.', { target: structuredClone(dockState.target) });
         }
+        if (await canSwitchWithoutRemovingPane(dockState, target)) return await dockCore(target, reserve, dockState);
         const restored = await undockCore(reserve);
         if (!restored.ok) return restored;
         restoredTarget = restored.target;

@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.9.1, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.9.2, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, explicit worktree placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -196,9 +196,9 @@ While typing in a command, search, or prompt field, ordinary letters such as `q`
 4. Read its output and enter any follow-up directly into its own input.
 5. From the right dock, press Herdr's default **Ctrl+B**, then **h** to focus the Shep pane on the left. If you changed Herdr's `focus_pane_left` binding, use your configured key. You can also click Shep's pane.
 
-A mouse click on an agent row selects it. Selecting another agent returns the previous one to its original tab and split position before docking the new one. Press **t** to turn off the dock and show Shep's details panel; press **t** again to resume docking. Shep leaves agents that are still starting in place. The dock moves a pane; it does not send text or keys to it.
+A mouse click on an agent row selects it. On a wide dock, switching brings the next agent pane in before returning the previous one to its original tab and split position. When there is not room for both agent panes, Shep returns the previous one first. Press **t** to turn off the dock and show Shep's details panel; press **t** again to resume docking. Shep leaves agents that are still starting in place. The dock moves a pane; it does not send text or keys to it.
 
-Herdr 0.9.1 does not swap panes across tabs, so Shep keeps a `shep-dock` labeled placeholder in the agent's original tab and moves the real pane beside Shep. Turning the dock off, pressing **q** or **Ctrl+C**, and closing a docked agent with **x** return it first. If the placeholder is running a command, Shep restores the agent beside it, removes the marker, leaves the busy pane open, and shows a notice. **Quit Shep with q before closing this tab — closing the tab also closes the docked agent.** Closing only Shep's pane sends SIGHUP, which makes Shep try one restore before exiting. After a crash, the next Shep startup uses the placeholder to restore the agent when its identity can be verified. If the original tab was closed, Shep can return it to a new tab in its original workspace; if the workspace was closed, it can use a new workspace. An uncertain identity or move leaves the pane running where it is and shows a notice. Inspect Herdr before moving it manually; Shep does not retry uncertain moves.
+Herdr 0.9.1 does not swap panes across tabs, so Shep keeps a `shep-dock` labeled placeholder in the agent's original tab and moves the real pane beside Shep. While docked, the agent appears in Shep's tab; **t** restores its own tab. On a wide dock, switching brings the next agent pane in before returning the previous one so Shep's width stays steady. Turning the dock off, pressing **q** or **Ctrl+C**, and closing a docked agent with **x** return it first. If the placeholder is running a command, Shep restores the agent beside it, removes the marker, leaves the busy pane open, and shows a notice. **Quit Shep with q before closing this tab — closing the tab also closes the docked agent.** Closing only Shep's pane sends SIGHUP, which makes Shep try one restore before exiting. After a crash, the next Shep startup uses the placeholder to restore the agent when its identity can be verified. If the original tab was closed, Shep returns it to a new tab labeled with the agent name in its original workspace; if the workspace was closed, it can use a new workspace. An uncertain identity or move leaves the pane running where it is and shows a notice. Inspect Herdr before moving it manually; Shep does not retry uncertain moves.
 
 To continue the same conversation from Shep, select the task or agent and press **p** (also available in details). Check the name, pane and status shown above the editor. Type or paste multiline text; Enter adds a newline. **Ctrl+S** sends once and **Esc** cancels while retaining that agent's draft in memory. Another `/dispatch` creates another agent.
 
@@ -356,7 +356,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.9.1.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.9.2.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 

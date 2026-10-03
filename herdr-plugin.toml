@@ -1,6 +1,6 @@
 id = "shep"
 name = "Shep"
-version = "0.4.0-checkpoint.9.1"
+version = "0.4.0-checkpoint.9.2"
 min_herdr_version = "0.9.1"
 description = "Dispatch, focus, and manage your Herdr agents from one terminal."
 platforms = ["macos", "linux"]
