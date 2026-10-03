@@ -1,5 +1,6 @@
 import { LIMITS, MESSAGES as DISPATCH_MESSAGES } from './contracts.mjs';
 import { safeText } from '../terminal.mjs';
+import { trustedSession } from '../agent-identity.mjs';
 
 // Herdr's no-activity gate is five seconds. Keep its verdict inside the
 // existing eight-second transport timeout; this applies only to first prompts.
@@ -47,8 +48,9 @@ export function createLaunchRunner(deps) {
         await observe(job, 'start', { target: { ...earlyTarget }, delivery: atLaunch ? 'launch' : 'type' });
         const start = await invoke(['agent', 'start', name, '--kind', request.provider, '--pane', pane.pane_id, '--timeout', '30000',
           ...(atLaunch || request.args?.length ? ['--', ...(request.args ?? []), ...(atLaunch ? [request.prompt] : [])] : [])], { timeoutMs: LIMITS.startTransportTimeoutMs });
+        const session = trustedSession(request.provider, start.result?.agent?.agent_session);
         const target = { paneId: pane.pane_id, terminalId: pane.terminal_id, provider: request.provider, agentName: name,
-          ...(start.result?.agent?.agent_session?.kind === 'id' ? { sessionId: start.result.agent.agent_session.value } : {}) };
+          ...(session?.kind === 'id' ? { sessionId: session.value } : {}) };
         compareAgent(target, start.result?.agent);
         const current = await checkedAgent(target);
         if (atLaunch) {
@@ -94,9 +96,11 @@ export function createLaunchRunner(deps) {
             const missing = name => name === undefined || name === null || name === '';
             if (pane.tab_id !== receipt.tabId || pane.workspace_id !== receipt.workspaceId
               || !missing(first.name) || !missing(observed.agent.name)) fail('changed_target');
-            if (first.agent_session?.kind === 'id') unnamed.sessionId = first.agent_session.value;
+            const firstSession = trustedSession(request.provider, first.agent_session);
+            if (firstSession?.kind === 'id') unnamed.sessionId = firstSession.value;
             compareAgent(unnamed, observed.agent);
-            if (observed.agent.agent_session?.kind === 'id') target.sessionId = observed.agent.agent_session.value;
+            const currentSession = trustedSession(request.provider, observed.agent.agent_session);
+            if (currentSession?.kind === 'id') target.sessionId = currentSession.value;
             const renamed = await invoke(['agent', 'rename', target.paneId, target.agentName]);
             compareAgent(target, renamed.result?.agent);
             return checkedAgent(target);

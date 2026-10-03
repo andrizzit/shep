@@ -89,7 +89,7 @@ test('pending focus refuses external, split, altered topology, identities, own p
     if (scenario === 'own') target = { ...target, paneId: 'w1:p1', terminalId: 'own-terminal' };
     if (scenario === 'demo') f.monitor.mode = 'demo';
     if (scenario === 'disconnected') f.monitor.source.state = 'disconnected';
-    assert.equal((await f.controller.focus(target)).ok, false, scenario); assert.equal(focusCalls(f).length, 0, scenario);
+    assert.equal((await f.controller.focus(target)).ok, scenario === 'known-session', scenario); assert.equal(focusCalls(f).length, scenario === 'known-session' ? 1 : 0, scenario);
     assert.equal(f.calls.filter(argv => argv[1] === 'start').length, 1);
     assert.equal(f.calls.filter(argv => ['prompt', 'close', 'remove'].includes(argv[1])).length, 0);
   }

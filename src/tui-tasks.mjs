@@ -5,6 +5,7 @@ import { agentName, tabLabel } from './dispatch/naming.mjs';
 import { DEFAULT_CONFIG, PROVIDER_IDS, validateArgs, validatePlacementIntent, validatePrompt } from './dispatch/contracts.mjs';
 import { createTask, transition, groupTasks } from './tasks.mjs';
 import { safeText } from './terminal.mjs';
+import { sessionMatches, trustedSession } from './agent-identity.mjs';
 
 export const TASK_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs you', done: 'Done', idle: 'Done', unknown: 'Starting', closed: 'Closed', queued: 'Starting', starting: 'Starting', needs_input: 'Needs you', needs_confirmation: 'Needs you', uncertain: 'Needs you', failed: 'Failed' });
 export const TASK_FILTERS = Object.freeze(['all', 'working', 'blocked', 'done', 'unknown', 'closed', 'failed']);
@@ -86,7 +87,7 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
   const updateTask = (id, update) => change({ tasks: read().tasks.map(task => task.id === id ? update(task) : task) });
   const context = () => ({ providers: read().profiles.providers, projects: read().projects, trustRequired: read().trustRequired,
     contextProjectKey: read().draft.projectKey, contextSubfolder: read().draft.subfolder, config: config() });
-  const targetSignature = task => JSON.stringify([task.attemptId, task.target?.paneId, task.target?.terminalId, task.target?.provider, task.target?.agentName, task.target?.sessionId]);
+  const targetSignature = task => JSON.stringify([task.attemptId, task.target?.paneId, task.target?.terminalId, task.target?.provider, task.target?.agentName, trustedSession(task.agent.provider, task.target?.sessionId)]);
   const projectFor = key => [...read().projects, ...read().trustRequired].find(project => (project.key || project.root) === key);
 
   async function refresh({ force = false } = {}) {
@@ -301,7 +302,8 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
       const agent = snapshot.agents.find(item => matchesTask(task, item));
       if (!agent) { missing = true; return task; }
       const status = ['working', 'blocked', 'done', 'idle', 'unknown'].includes(agent.status) ? agent.status : 'unknown';
-      const captured = !task.target.sessionId && agent.sessionId ? { ...task, target: { ...task.target, sessionId: agent.sessionId } } : task;
+      const sessionId = trustedSession(agent.provider, agent.sessionId);
+      const captured = !task.target.sessionId && sessionId ? { ...task, target: { ...task.target, sessionId } } : task;
       if (!['submitted', 'needs_input', 'uncertain'].includes(task.launch.state)) return ['working', 'done'].includes(status) ? { ...captured, observedActivity: true } : captured;
       const updated = transition(captured, { type: 'live', status, since: new Date(now()).toISOString(), paneId: task.target.paneId, terminalId: task.target.terminalId });
       if (['working', 'done'].includes(status)) updated.observedActivity = true;
@@ -408,5 +410,5 @@ export function createTaskSession({ controller, registry, getConfig = () => DEFA
 export function matchesTask(task, agent) {
   return task.target && task.target.paneId === agent.paneId && task.target.terminalId === agent.terminalId
     && task.agent.provider === agent.provider && (!task.target.agentName || [agent.agentName, agent.name].includes(task.target.agentName))
-    && (!task.target.sessionId || task.target.sessionId === agent.sessionId);
+    && sessionMatches(task.agent.provider, task.target.sessionId, agent.sessionId);
 }

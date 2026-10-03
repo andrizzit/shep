@@ -3,7 +3,8 @@ import { access, stat } from 'node:fs/promises';
 import * as nativeFs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { DEFAULT_CONFIG, DELIVERY_POLICIES, LIMITS, MESSAGES as DISPATCH_MESSAGES, validateDispatchRequest, validatePrompt } from './dispatch/contracts.mjs';
+import { DEFAULT_CONFIG, DELIVERY_POLICIES, LIMITS, MESSAGES as DISPATCH_MESSAGES, PATTERNS, validateDispatchRequest, validatePrompt } from './dispatch/contracts.mjs';
+import { sessionMatches, trustedSession } from './agent-identity.mjs';
 import { createGitRunner } from './gitinfo.mjs';
 import { normalizeControlSnapshot } from './herdr.mjs';
 import { safeText } from './terminal.mjs';
@@ -200,24 +201,26 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     if (target.paneId === own.pane_id || target.terminalId === own.terminal_id) fail('self_target');
   }
 
-  function compareAgent(target, agent, checkStatus = false) {
+  function compareAgent(target, agent, checkStatus = false, exactName = false) {
+    const managedName = value => typeof value === 'string' && value.length ? value : null;
     if (!agent || agent.pane_id !== target.paneId || agent.terminal_id !== target.terminalId
       || (target.provider && agent.agent !== target.provider)
       || (target.agentName != null && agent.name !== target.agentName)
-      || (target.sessionId != null && (agent.agent_session?.kind !== 'id' || agent.agent_session.value !== target.sessionId))) fail('changed_target');
+      || (exactName && managedName(agent.name) !== managedName(target.agentName))
+      || !sessionMatches(target.provider ?? agent.agent, target.sessionId, agent.agent_session?.kind === 'id' ? agent.agent_session.value : undefined, true)) fail('changed_target');
     if (checkStatus && (!present(target.status) || agent.agent_status !== target.status)) fail('changed_status');
   }
 
-  async function checkedAgent(target, checkStatus = false) {
+  async function checkedAgent(target, checkStatus = false, exactName = false) {
     const { snapshot, own } = await fresh();
     checkTarget(target, own);
     const pane = snapshot.panes.find(p => p.pane_id === target.paneId);
     if (!pane || pane.terminal_id !== target.terminalId) fail('changed_target');
     const agent = snapshot.agents.find(a => a.pane_id === target.paneId);
-    compareAgent(target, agent, checkStatus);
+    compareAgent(target, agent, checkStatus, exactName);
     // This second read narrows the race against an agent replacement after confirmation.
     const current = (await invoke(['agent', 'get', target.paneId])).result?.agent;
-    compareAgent(target, current, checkStatus);
+    compareAgent(target, current, checkStatus, exactName);
     return { snapshot, agent: current };
   }
 
@@ -307,7 +310,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
       let command = ['agent', 'focus', target.paneId];
       if (!initial.snapshot.agents.some(a => a.pane_id === target.paneId)) {
         const pending = operationLocks.get(`pane:${target.paneId}`);
-        const created = !target.sessionId && sameStartupTarget(target, pending?.startupTarget) ? receipts.get(pending.taskKey)?.created : null;
+        const created = !trustedSession(target.provider, target.sessionId) && sameStartupTarget(target, pending?.startupTarget) ? receipts.get(pending.taskKey)?.created : null;
         const receipt = created?.panes.find(pane => pane.paneId === target.paneId && pane.terminalId === target.terminalId);
         const panes = receipt && initial.snapshot.panes.filter(pane => pane.tab_id === receipt.tabId);
         if (!receipt || !created.tabIds.includes(receipt.tabId) || panes.length !== 1
@@ -361,6 +364,25 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     });
   }
 
+  async function rename({ target, name } = {}) {
+    const captured = target && { ...target, agentName: Object.hasOwn(target, 'agentName') ? target.agentName : target.name ?? null };
+    return operation(captured, async () => {
+      if (typeof name !== 'string' || !PATTERNS.agentName.test(name)) fail('invalid_name');
+      if (!present(captured?.provider)) fail('invalid_target');
+      const current = await checkedAgent(captured, false, true);
+      if (current.agent.launch_pending === true || current.snapshot.agents.find(agent => agent.pane_id === captured.paneId)?.launch_pending === true) fail('busy');
+      const renamed = { ...captured, agentName: name };
+      try {
+        const response = await invoke(['agent', 'rename', captured.paneId, name]);
+        compareAgent(renamed, response.result?.agent, false, true);
+        await checkedAgent(renamed, false, true);
+        return outcome('submitted', 'Agent renamed.', { paneId: captured.paneId, terminalId: captured.terminalId, agentName: name });
+      } catch (error) {
+        return outcome('uncertain', 'Rename could not be confirmed. Check the pane; Shep will not repeat it automatically.', { code: errorCode(error), paneId: captured.paneId, terminalId: captured.terminalId });
+      }
+    });
+  }
+
   async function notify({ title, body, sound = 'none' } = {}) {
     try {
       assertLive();
@@ -400,5 +422,5 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   const { listWorktrees, removeWorktree } = createCleanupOperations({ assertLive, directory: targetService.directory,
     invoke, trusted, fail, operation, receipts, pinned, locked, getControlSnapshot, fs, outcome,
     operationLocks, jobs, UNCERTAIN, errorCode, messageFor, reservations });
-  return { getProfiles, getControlSnapshot, dispatch, focus, closeAgent, followUp, notify, listWorktrees, removeWorktree, dismissTask, dispose };
+  return { getProfiles, getControlSnapshot, dispatch, focus, closeAgent, followUp, rename, notify, listWorktrees, removeWorktree, dismissTask, dispose };
 }

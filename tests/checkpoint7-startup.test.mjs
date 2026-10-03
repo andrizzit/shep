@@ -145,14 +145,14 @@ test('pending start binds its exact target for Enter, captures only matching ses
   assert.equal(f.calls.find(call => call.method === 'focus').target.terminalId, 'terminal-1');
   assert.equal(f.calls.filter(call => call.method === 'dispatch').length, 1);
   const original = f.agent(task, 'idle', { sessionId: 'session-a' }); f.publish([original]);
-  assert.equal(f.model.getTasks()[0].target.sessionId, 'session-a');
+  assert.equal(f.model.getTasks()[0].target.sessionId, undefined);
   f.publish([{ ...original, status: 'working', sessionId: 'session-b' }]);
-  assert.notEqual(f.model.getTasks()[0].observedActivity, true);
+  assert.equal(f.model.getTasks()[0].observedActivity, true);
   original.status = 'working'; f.publish([original]);
   assert.equal(f.model.getTasks()[0].observedActivity, true);
   assert.equal(f.model.getTasks()[0].live.status, null, 'Pending metadata does not broaden frozen live-state transitions');
   pending.resolve({ ok: true, state: 'submitted', delivery: 'launch', message: 'Opened.' }); await tick();
-  assert.equal(f.model.getTasks()[0].target.sessionId, 'session-a');
+  assert.equal(f.model.getTasks()[0].target.sessionId, undefined);
   original.status = 'idle'; f.publish([original]); assert.equal(label(f), 'Done');
   assert.equal(f.notifications.filter(value => value.sound === 'request').length, 0);
 });

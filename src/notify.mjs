@@ -1,14 +1,15 @@
 import { PROVIDERS } from './dispatch/contracts.mjs';
 import { safeText } from './terminal.mjs';
+import { sessionMatches, trustedSession } from './agent-identity.mjs';
 
 // Match the same optional identity constraints as tasks.mjs identify(). A pane
 // and terminal can survive an agent replacement, so neither alone is sufficient.
 const matches = (target, agent) => target && agent.paneId === target.paneId && agent.terminalId === target.terminalId
   && (!target.provider || agent.provider === target.provider)
   && (!target.agentName || agent.agentName === target.agentName || agent.name === target.agentName)
-  && (!target.sessionId || agent.sessionId === target.sessionId);
-const identity = target => JSON.stringify([target?.paneId, target?.terminalId, target?.provider ?? null,
-  target?.agentName ?? null, target?.sessionId ?? null]);
+  && sessionMatches(target.provider ?? agent.provider, target.sessionId, agent.sessionId);
+const identity = (target, provider) => JSON.stringify([target?.paneId, target?.terminalId, target?.provider ?? null,
+  target?.agentName ?? null, trustedSession(target?.provider ?? provider, target?.sessionId) ?? null]);
 
 // Watches metadata only; the caller owns lifecycle/config-reload wiring.
 export function createNotifier({ monitor, controller, config, getTasks = () => [], now = Date.now } = {}) {
@@ -41,7 +42,7 @@ export function createNotifier({ monitor, controller, config, getTasks = () => [
       const occupant = snapshot.agents?.find(a => a.paneId === task.target?.paneId && a.terminalId === task.target?.terminalId);
       const agent = occupant && matches(task.target, occupant) ? occupant : null;
       const replaced = Boolean(occupant && !agent);
-      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), identity: identity(task.target), launch: task.launch?.state,
+      const value = { status: agent?.status ?? 'unknown', observed: Boolean(agent), identity: identity(task.target, task.provider), launch: task.launch?.state,
         launchCode: task.launch?.code ?? null, delivery: task.launch?.delivery, paneId: task.target?.paneId ?? null, terminalId: task.target?.terminalId ?? null };
       const old = previous.get(task.id);
       const setup = value.launch === 'needs_input' && old?.launch !== 'needs_input';

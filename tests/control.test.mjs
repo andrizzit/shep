@@ -215,8 +215,8 @@ test('fresh session identity and status are required before closing a selected a
     if (field === 'name') agent.name = 'replacement';
     if (field === 'agent_session') agent.agent_session.value = 'session-b';
     if (field === 'agent_status') agent.agent_status = 'working';
-    assert.equal((await f.controller.closeAgent(target)).ok, false, field);
-    assert.ok(!f.calls.some(c => c.argv[1] === 'close'));
+    assert.equal((await f.controller.closeAgent(target)).ok, field === 'agent_session', field);
+    assert.equal(f.calls.some(c => c.argv[1] === 'close'), field === 'agent_session');
   }
 });
 

@@ -231,8 +231,8 @@ test('summaries use actual target cwd, throttle ten seconds and reject reused ag
     return { ok: true, state: 'submitted', message: 'Sent', taskId: input.taskId, attemptId: input.attemptId, paneId: 'w1:p7', terminalId: 'terminal7',
       placement: { mode: 'here', targetKind: 'tab', reason: 'Auto → here', cwd: project.root + '/src', notices: [] } };
   } } }); t.after(model.destroy);
-  model.paste('/dispatch task'); model.key('', { return: true }); await tick();
-  const agent = { id: 'terminal7', terminalId: 'terminal7', paneId: 'w1:p7', provider: 'codex', name: request.name, agentName: request.name, sessionId: 'native-session1', status: 'working', workspace: { path: project.root } };
+  model.paste('/dispatch claude: task'); model.key('', { return: true }); await tick();
+  const agent = { id: 'terminal7', terminalId: 'terminal7', paneId: 'w1:p7', provider: 'claude', name: request.name, agentName: request.name, sessionId: 'native-session1', status: 'working', workspace: { path: project.root } };
   publish({ agents: [agent] }); await tick(); assert.equal(summaries.length, 0);
   publish({ agents: [{ ...agent, status: 'done' }] }); await tick();
   assert.equal(summaries.length, 1); assert.equal(summaries[0].cwd, project.root + '/src');
@@ -381,10 +381,10 @@ test('opening task detail refreshes a throttled summary while working; stale fai
         placement: { mode: 'here', targetKind: 'tab', reason: 'Auto → here', cwd: project.root, notices: [] } };
     },
   } }); t.after(model.destroy);
-  model.paste('/dispatch task'); model.key('', { return: true }); await tick();
+  model.paste('/dispatch claude: task'); model.key('', { return: true }); await tick();
   model.action('details'); await tick(); assert.equal(count, 1);
   model.action('cancel'); model.action('details'); await tick(); assert.equal(count, 1);
-  publish({ agents: [{ id: 'terminal7', paneId: 'w1:p7', terminalId: 'terminal7', provider: 'codex', name: request.name, sessionId: 'bound-session', status: 'working', workspace: { path: project.root } }] });
+  publish({ agents: [{ id: 'terminal7', paneId: 'w1:p7', terminalId: 'terminal7', provider: 'claude', name: request.name, sessionId: 'bound-session', status: 'working', workspace: { path: project.root } }] });
   pending.reject(new Error('Late Git failure')); await tick();
   assert.equal(model.getTasks()[0].summary, null, 'A failure from before identity binding must not overwrite the current task');
 });

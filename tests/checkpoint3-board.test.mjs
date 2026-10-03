@@ -69,18 +69,19 @@ async function fixture(t, { agents = [external()], controller: overrides = {} } 
 }
 
 test('follow-up drafts belong to captured agents, survive Escape and refresh, and paste is never a shortcut', async t => {
-  const second = external({ id: 'second', terminalId: 'second', paneId: 'w1:p3', sessionId: 'second-session', name: 'Second' });
-  const { model, calls, publish } = await fixture(t, { agents: [external(), second] });
+  const second = external({ id: 'second', terminalId: 'second', paneId: 'w1:p3', sessionId: 'second-session', name: 'Second', provider: 'claude' });
+  const first = external({ provider: 'claude' });
+  const { model, calls, publish } = await fixture(t, { agents: [first, second] });
   model.key('p'); assert.equal(model.getSnapshot().view, 'follow-up');
   model.paste('q\nc\np\n$(literal)');
-  publish({ agents: [second, external()] });
+  publish({ agents: [second, first] });
   assert.equal(model.getSnapshot().followUp.target.terminalId, 'external-terminal');
   model.key('', { escape: true }); model.action('select-task', 'external:second'); model.key('p');
   assert.equal(model.getSnapshot().followUp.text, ''); model.paste('Second draft');
   model.key('', { escape: true }); model.action('select-task', 'external:external-terminal'); model.key('p');
   assert.equal(model.getSnapshot().followUp.text, 'q\nc\np\n$(literal)'); assert.equal(calls.length, 0);
   model.key('', { escape: true });
-  publish({ agents: [second, external({ sessionId: 'replacement' })] }); model.key('p');
+  publish({ agents: [second, external({ sessionId: 'replacement', provider: 'claude' })] }); model.key('p');
   assert.equal(model.getSnapshot().followUp.text, '', 'A reused pane never inherits another session’s draft');
 });
 
@@ -133,7 +134,9 @@ test('follow-up refuses own, stale, demo and unconfirmed targets before opening 
     model.key('s', { ctrl: true }); await tick(); assert.equal(calls.length, 0);
   }
   for (const patch of [{ agents: [external({ sessionId: 'replacement' })] }, { agents: [external({ agentName: 'replacement' })] }, { source: { state: 'disconnected' } }, { mode: 'demo' }]) {
-    const { model, calls, publish } = await fixture(t, { agents: [external({ agentName: 'captured' })] });
+    const provider = patch.agents?.[0]?.sessionId === 'replacement' ? 'claude' : 'codex';
+    if (patch.agents) patch.agents[0].provider = provider;
+    const { model, calls, publish } = await fixture(t, { agents: [external({ agentName: 'captured', provider })] });
     model.key('p'); model.paste('Do not misroute'); publish(patch); model.key('s', { ctrl: true }); await tick();
     assert.equal(calls.length, 0); assert.equal(model.getSnapshot().followUp.text, 'Do not misroute');
   }

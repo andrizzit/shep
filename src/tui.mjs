@@ -34,8 +34,8 @@ function Click({ registry, id, action, children, ...props }) {
   }, [registry, id, action]);
   return h(Box, { ref, ...props }, children);
 }
-function Button({ label, active = false, disabled = false, registry, id, action }) {
-  return h(Click, { registry, id, action, flexShrink: 0, paddingX: 1, backgroundColor: active ? C.orange : C.panel },
+function Button({ label, active = false, disabled = false, registry, id, action, paddingLeft = 1 }) {
+  return h(Click, { registry, id, action, flexShrink: 0, paddingLeft, paddingRight: 1, backgroundColor: active ? C.orange : C.panel },
     line(label, { color: disabled ? C.faint : active ? C.canvas : C.ink, bold: active }));
 }
 function Dog({ compact = false }) {
@@ -103,19 +103,20 @@ function rowCells(state, row) {
     provider: providerName(row.task?.agent.provider || row.agent?.provider), model: shortModel(info?.model) || '', effort: info?.effort || '',
     folder: rowFolder(row) || elapsed(row.elapsedMs) };
 }
-function rowColumns(state, rows, width) {
+function rowColumns(state, rows, width, listWidth) {
   const values = rows.map(row => rowCells(state, row));
+  const gap = listWidth >= 100 ? 3 : listWidth >= 70 ? 2 : 1;
   const widest = (field, cap) => Math.min(cap, Math.max(0, ...values.map(value => displayWidth(value[field]))));
   const columns = { name: widest('name', 24), status: widest('status', 11), provider: widest('provider', 12),
     model: width < 50 ? 0 : widest('model', 24), effort: width < 50 ? 0 : widest('effort', 8), folder: widest('folder', 22) };
   const minimumName = Math.min(columns.name, 16);
-  const used = name => 3 + name + Object.entries(columns).filter(([key]) => key !== 'name').reduce((sum, [, size]) => sum + (size ? size + 1 : 0), 0);
+  const used = name => 3 + name + Object.entries(columns).filter(([key]) => key !== 'name').reduce((sum, [, size]) => sum + (size ? size + gap : 0), 0);
   // Optional fields give way in this order; every visible row shares the same
   // widths, including its blank cells. Useful names and statuses lead the row.
   for (const field of ['effort', 'model', 'folder']) if (used(columns.name) > width) columns[field] = 0;
   if (used(minimumName) > width) columns.provider = Math.max(0, columns.provider - (used(minimumName) - width));
   columns.name = Math.max(1, Math.min(columns.name, width - (used(0))));
-  return columns;
+  return { ...columns, gap };
 }
 function NamedRow({ state, row, active, width, columns }) {
   const status = taskPresentation(row), { name, pane } = rowName(row);
@@ -126,7 +127,7 @@ function NamedRow({ state, row, active, width, columns }) {
     line(`${attention(row) ? '▌' : active ? '›' : status === 'working' ? '●' : '○'}${attention(row) && active ? '›' : ' '} `, { color: taskColor(status), bold: attention(row) }),
     h(Box, { width: columns.name, flexShrink: 0 }, h(Text, { wrap: 'truncate-end' }, h(Text, { color: C.ink, bold: true }, shownName),
       pane && paneWidth > 0 ? h(Text, { color: C.faint }, ' ' + truncate(pane, paneWidth)) : null)),
-    ...['status', 'provider', 'model', 'effort', 'folder'].filter(field => columns[field]).flatMap(field => [line(' ', { key: `${field}-gap` }),
+    ...['status', 'provider', 'model', 'effort', 'folder'].filter(field => columns[field]).flatMap(field => [line(' '.repeat(columns.gap), { key: `${field}-gap` }),
       h(Box, { key: field, width: columns[field], height: 1, flexShrink: 0 }, field === 'status' ? h(Badge, { status }) : line(truncate(cells[field], columns[field]), { color: C.faint }))]));
 }
 export function listRows(state) {
@@ -153,7 +154,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
   const rows = listRows(state);
   const capacity = Math.max(1, height - 4);
   const shown = rows.slice(offset, offset + capacity);
-  const columns = rowColumns(state, shown.filter(row => row.type === 'agent').map(row => row.row), width - 4);
+  const columns = rowColumns(state, shown.filter(row => row.type === 'agent').map(row => row.row), width - 4, width);
   const selected = state.snapshot.agents.find(agent => agent.id === state.selectedId);
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
     h(Box, { height: 1, justifyContent: 'space-between', flexShrink: 0 }, line('YOUR AGENTS', { color: C.muted, bold: true }), line(`${visibleAgents(state).length} shown`, { color: C.faint })),
@@ -179,7 +180,7 @@ function TaskList({ state, model, width, height, registry, offset = 0, compactAc
   const rows = boardRows(state);
   const capacity = Math.max(1, height - 4);
   const shown = rows.slice(offset, offset + capacity);
-  const columns = rowColumns(state, shown.filter(item => item.type === 'task').map(item => item.row), width - 4);
+  const columns = rowColumns(state, shown.filter(item => item.type === 'task').map(item => item.row), width - 4, width);
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
     h(Box, { height: 1, flexShrink: 0, justifyContent: 'space-between' }, line('TASKS', { color: C.muted, bold: true }), line(`${taskRows(state).length} shown`, { color: C.faint })),
     ...shown.map(item => {
@@ -201,6 +202,7 @@ function TaskDetail(props) {
 }
 function OwnedTaskDetail({ state, model, width, height, registry, row }) {
   const task = row.task;
+  const renameDisabled = !row.agent || Boolean(state.busy || controlBlock(state)) || ['queued', 'starting'].includes(task.launch.state) || row.agent.launchPending === true;
   const createdWorktree = task.created?.worktree;
   const worktree = createdWorktree && createdWorktree.workspaceId === task.created.workspaceId ? createdWorktree : null;
   // This is a copyable command only. Use the response-confirmed creation
@@ -230,6 +232,7 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
     h(Box, { gap: 0, flexShrink: 0 },
       h(Button, { label: '↑', registry, id: 'detail-up', action: () => model.action('detail-position', Math.max(0, offset - 1)) }),
       h(Button, { label: '↓', registry, id: 'detail-down', action: () => model.action('detail-position', Math.min(lines.length - 1, offset + 1)) }),
+      h(Button, { label: 'e Rename', registry, id: 'rename', disabled: renameDisabled, action: () => model.action('rename') }),
       line(`${offset + 1}–${Math.min(offset + capacity, lines.length)}/${lines.length}`, { color: C.faint })),
     h(Box, { gap: 0, flexShrink: 0 },
       h(Button, { label: 'Focus ↵', registry, id: 'focus', action: () => model.action('focus') }),
@@ -242,6 +245,7 @@ function Detail({ state, model, width, height, registry }) {
   const row = agent && agentRow(state, agent);
   if (row?.task) return h(OwnedTaskDetail, { state, model, width, height, registry, row });
   const disabled = Boolean(controlBlock(state)) || state.view === 'command';
+  const renameDisabled = disabled || Boolean(state.busy) || agent?.launchPending === true;
   const { name, pane } = row ? rowName(row) : {};
   const content = agent ? ['Task text unavailable for this agent.', ...(attention(row) ? [rowSupplement(row)] : []), providerName(agent.provider), ...modelDetails(state, agent),
     agent.workspace?.path || 'Working directory unavailable', `Pane: ${agent.paneId}`, `Terminal: ${agent.terminalId || agent.id}`] : [];
@@ -257,6 +261,7 @@ function Detail({ state, model, width, height, registry }) {
       h(Box, { gap: 0, flexShrink: 0 },
         h(Button, { label: '↑', registry, id: 'detail-up', action: () => model.action('detail-position', Math.max(0, offset - 1)) }),
         h(Button, { label: '↓', registry, id: 'detail-down', action: () => model.action('detail-position', Math.min(lines.length - 1, offset + 1)) }),
+        h(Button, { label: 'e Rename', registry, id: 'rename', disabled: renameDisabled, action: () => model.action('rename') }),
         line(`${offset + 1}–${Math.min(offset + capacity, lines.length)}/${lines.length}`, { color: C.faint })),
       h(Box, { gap: 0, flexShrink: 0 },
         h(Button, { label: 'Enter Focus', registry, id: 'focus', disabled, action: () => model.action('focus') }),
@@ -299,6 +304,22 @@ function FollowUpEditor({ state, model, width, height, registry }) {
     h(Box, { gap: 1, flexShrink: 0 },
       h(Button, { label: 'Send Ctrl+S', registry, id: 'follow-up-send', disabled: Boolean(controlBlock(state)), action: () => model.action('follow-up-send') }),
       h(Button, { label: 'Back Esc', registry, id: 'follow-up-back', action: () => model.action('cancel') })));
+}
+function RenameEditor({ state, model, width, height, registry }) {
+  const { target, text, cursor, error } = state.rename;
+  const chars = graphemes(text), cellWidth = Math.max(1, width - 4);
+  let start = cursor, before = '';
+  while (start > 0 && displayWidth(safeText(chars[start - 1]) + before) < cellWidth) before = safeText(chars[--start]) + before;
+  const content = before + '▏' + truncate(chars.slice(cursor).join(''), cellWidth - displayWidth(before) - 1);
+  return h(Box, { width, height, borderStyle: 'round', borderColor: C.orange, paddingX: 1, flexDirection: 'column', overflow: 'hidden' },
+    line('RENAME AGENT', { color: C.orange, bold: true }),
+    line(`${providerName(target.provider)} · ${target.paneId}`, { color: C.muted }),
+    h(Box, { height: 1, flexShrink: 0, backgroundColor: C.selected }, line(content)),
+    line(error || 'a-z, then a-z, 0-9, _ or -; max 32.', { color: error ? C.blocked : C.faint }),
+    h(Box, { flexGrow: 1 }),
+    h(Box, { gap: 1, flexShrink: 0 },
+      h(Button, { label: state.busy === 'rename' ? 'Renaming…' : 'Rename Enter', registry, id: 'rename-send', disabled: Boolean(state.busy || controlBlock(state)), action: () => model.action('rename-send') }),
+      h(Button, { label: 'Cancel Esc', registry, id: 'rename-back', action: () => model.action('cancel') })));
 }
 function Composer({ state, model, width, height, registry }) {
   const provider = state.profiles.providers.find(item => item.id === state.draft.provider);
@@ -481,28 +502,26 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const status = health(state);
   const agents = state.snapshot.agents || [];
   const headerHeight = short ? 1 : compact ? 2 : 4;
-  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up'].includes(state.view) ? 0 : 3;
+  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up', 'rename'].includes(state.view) ? 0 : 3;
   const footerHeight = short ? 1 : 2;
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : 2;
   const suggestionRows = state.view === 'command' && state.suggestions.length ? Math.max(1, Math.min(5, state.suggestions.length, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - 5)) : 0;
   const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
   const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
   const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
-  const visibleModel = boardRows(state).slice(offset, offset + Math.max(1, bodyHeight - 4)).some(item => {
-    const info = modelInfo(state, item.type === 'task' ? item.row.agent : item.type === 'agent' ? item.agent : null);
-    return info?.model || info?.effort;
-  });
-  const listWidth = split ? Math.floor(width * (width >= 110 && visibleModel ? .7 : .52)) : width;
+  const listWidth = split ? Math.floor(width * (width >= 110 ? .7 : .52)) : width;
   const rightWidth = width - listWidth;
-  const activePanel = state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
+  const activePanel = state.view === 'rename' ? RenameEditor : state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
   const List = state.boardView === 'tasks' ? TaskList : AgentList;
   const notice = state.notice?.message || (state.snapshot.source.state !== 'connected' ? `${state.snapshot.updatedAt ? 'Stale snapshot. ' : ''}${state.snapshot.source.message || 'Waiting for Herdr…'}` : state.snapshot.mode === 'demo' ? 'Sample agents only. Launch, focus and close are disabled.' : state.view === 'command' ? 'Colon optional for clear prefixes. Enter submits unless arrows selected a suggestion.' : state.view === 'confirm' ? 'Review the captured identity. Cancel is selected by default.' : state.view === 'compose' ? 'Optional launch settings. Escape keeps your draft.' : 'Ready. Type /dispatch your task, or select an agent to focus its native pane.');
   let footer = state.view === 'command' ? 'Enter dispatch · Esc keep command · Ctrl+C quit' : state.view === 'compose' ? short ? 'Tab fields · Ctrl+S dispatch · Esc back' : 'Tab / Shift+Tab fields  ←→ choose  Ctrl+S dispatch  Esc keep draft  Ctrl+C quit' : state.view === 'confirm' ? 'Tab choose · Enter activate · y close · Esc cancel' : state.view === 'search' ? 'Type to search · Enter keep · Esc clear · Ctrl+C quit' : short ? 'q quit · / dispatch · ↑↓ · ↵ focus · x' : '/ dispatch  ↑↓ / jk select  Enter focus  x close  n New agent  s search  f filter  q quit';
   const project = [...state.projects, ...state.trustRequired].find(item => (item.key || item.root) === state.draft.projectKey);
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
   if (state.view === 'follow-up') footer = 'Ctrl+S send · Esc keeps draft';
+  if (state.view === 'rename') footer = 'Enter rename · Esc cancel';
   const boardActions = ['board', 'detail'].includes(state.view);
   const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
+  const renameDisabled = !model.selected() || Boolean(state.busy || controlBlock(state)) || model.selected()?.launchPending === true || ['queued', 'starting'].includes(selectedTask?.launch.state);
   const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
   const clearableTasks = state.tasks.some(task => !task.dismissed && (task.live.status === 'closed' || task.launch.state === 'failed'));
   const defaultProvider = state.view === 'command' ? 'codex' : state.draft.provider;
@@ -540,12 +559,13 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
       suggestionHeight > 0 && bodyHeight < 5 ? null : split ? h(React.Fragment, null,
         h(List, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
-        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
+        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up', 'rename'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
     state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
       h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4)))),
     h(Box, { height: footerHeight, flexDirection: 'column', flexShrink: 0 },
       h(Box, { height: 1, flexShrink: 0 },
-        h(Button, { label: short ? 'Quit' : 'Quit Ctrl+C', registry, id: 'quit', action: () => model.action('quit') }),
+        h(Button, { label: short ? 'Quit' : 'Quit Ctrl+C', registry, id: 'quit', paddingLeft: short ? 0 : 1, action: () => model.action('quit') }),
+        boardActions && h(Button, { label: 'e Rename', registry, id: 'rename-footer', disabled: renameDisabled, action: () => model.action('rename') }),
         boardActions && h(Button, { label: 'p Send', registry, id: 'follow-up', disabled: !model.selected() || Boolean(controlBlock(state)), action: () => model.action('follow-up') }),
         boardActions && clearable && h(Button, { label: 'c Clear', registry, id: 'clear', action: () => model.action('clear') }),
         boardActions && clearableTasks && h(Button, { label: 'C All', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),

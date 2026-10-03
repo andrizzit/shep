@@ -46,7 +46,7 @@ test('final outcomes preserve observed session identity and cannot replace an ea
   const pending = transition(task(), { type: 'progress', event }); pending.target.sessionId = 'session-a'; pending.observedActivity = true;
   const outcome = { taskId: 'task', attemptId: 'attempt', ok: true, state: 'submitted', message: 'Opened.', paneId: 'pane', terminalId: 'terminal', agentName: 'task-agent', delivery: 'launch' };
   const finished = transition(pending, { type: 'outcome', outcome });
-  assert.equal(finished.target.sessionId, 'session-a'); assert.equal(finished.observedActivity, true);
+  assert.equal(finished.target.sessionId, undefined); assert.equal(finished.observedActivity, true);
   for (const patch of [{ paneId: 'replacement' }, { terminalId: 'replacement' }, { agentName: 'replacement' }, { delivery: 'type' }]) {
     assert.throws(() => transition(pending, { type: 'outcome', outcome: { ...outcome, ...patch } }));
   }

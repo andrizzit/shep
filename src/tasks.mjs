@@ -3,6 +3,7 @@ import { BOARD_STATE_ORDER, FINAL_LAUNCH_STATES, LAUNCH_TRANSITIONS, LIVE_STATES
   assertContract, validateArgs, validateDispatchSpec, validateOutcome, validatePlacementIntent, validateProgressEvent } from './dispatch/contracts.mjs';
 import { tabLabel } from './dispatch/naming.mjs';
 import { safeText } from './terminal.mjs';
+import { sessionMatches, trustedSession } from './agent-identity.mjs';
 
 const copy = value => structuredClone(value);
 const fail = message => { throw new TypeError(message); };
@@ -11,7 +12,7 @@ const inside = (root, path) => { if (!root || !path || !isAbsolute(path)) return
 const identify = (task, agent) => task.target && agent.paneId === task.target.paneId && agent.terminalId === task.target.terminalId
   && (!task.target.provider || agent.provider === task.target.provider)
   && (!task.target.agentName || agent.agentName === task.target.agentName || agent.name === task.target.agentName)
-  && (!task.target.sessionId || agent.sessionId === task.target.sessionId);
+  && sessionMatches(task.target.provider ?? task.agent.provider, task.target.sessionId, agent.sessionId);
 
 export function createTask(spec, { id, attemptId, groupId = null, at, name, args = [], placement } = {}) {
   assertContract(validateDispatchSpec(spec));
@@ -48,7 +49,7 @@ export function transition(task, event) {
       if (progress.target.provider !== task.agent.provider || progress.target.agentName !== task.name
         || (task.target && ['paneId', 'terminalId', 'provider', 'agentName'].some(key => task.target[key] !== progress.target[key]))) fail('Startup target does not match this task.');
       updated.target = { paneId: progress.target.paneId, terminalId: progress.target.terminalId, provider: progress.target.provider,
-        agentName: progress.target.agentName, ...(task.target?.sessionId ? { sessionId: task.target.sessionId } : {}) };
+        agentName: progress.target.agentName, ...(trustedSession(task.agent.provider, task.target?.sessionId) ? { sessionId: task.target.sessionId } : {}) };
     }
     if (progress.delivery) updated.launch.delivery = progress.delivery;
   } else if (event.type === 'outcome') {
@@ -65,7 +66,7 @@ export function transition(task, event) {
     if (outcome.paneId && outcome.terminalId) {
       const target = { paneId: outcome.paneId, terminalId: outcome.terminalId, provider: task.agent.provider, agentName: outcome.agentName ?? task.name };
       if (task.target && ['paneId', 'terminalId', 'provider', 'agentName'].some(key => task.target[key] !== target[key])) fail('Outcome target does not match startup.');
-      updated.target = { ...target, ...(task.target?.sessionId ? { sessionId: task.target.sessionId } : {}) };
+      updated.target = { ...target, ...(trustedSession(task.agent.provider, task.target?.sessionId) ? { sessionId: task.target.sessionId } : {}) };
     }
   } else if (event.type === 'confirmation') {
     if (task.launch.state !== 'needs_confirmation' || typeof event.approved !== 'boolean' || !instant(event.at)) fail('No trust confirmation is pending for this task.');

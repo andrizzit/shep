@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { trustedSession } from './agent-identity.mjs';
 
 const TAIL_BYTES = 64 * 1024;
 const REFRESH_MS = 10_000;
@@ -110,7 +111,7 @@ async function tailFields(file, info, adapter) {
 export function createModelReader({ home = homedir(), now = Date.now } = {}) {
   const cache = new Map();
   return async function read(request = {}) {
-    const provider = request?.provider, sessionId = request?.sessionId;
+    const provider = request?.provider, sessionId = trustedSession(provider, request?.sessionId);
     if (typeof provider !== 'string') return undefined;
     const adapter = Object.hasOwn(adapters, provider) ? adapters[provider] : null;
     if (!adapter || typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return undefined;

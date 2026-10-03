@@ -121,7 +121,7 @@ test('the second preflight read must still be unnamed, same-provider and same-se
     const f = await fixture(t, { get: (f, count) => {
       if (count === 1) f.snapshot.agents[0][field] = field === 'agent_session' ? { kind: 'id', value: 'replacement-session' } : 'replacement';
     } });
-    assert.equal((await f.dispatch()).state, 'uncertain'); assertOnceOnly(f, 0);
+    assert.equal((await f.dispatch()).state, field === 'agent_session' ? 'submitted' : 'uncertain'); assertOnceOnly(f, field === 'agent_session' ? 1 : 0);
   }
   const f = await fixture(t, { start: f => { f.snapshot.agents[0].name = 'other-agent'; },
     get: f => { delete f.snapshot.agents[0].name; } });
@@ -139,7 +139,7 @@ test('rename failures and changed postflight identity remain uncertain and never
       renamed: (f, response) => { if (phase === 'response') change(response.result.agent); if (phase === 'snapshot') change(f.snapshot.agents[0]); },
       get: (f, count) => { if (phase === 'get' && count === 2) change(f.snapshot.agents[0]); },
     });
-    assert.equal((await f.dispatch()).state, 'uncertain', `${phase}/${field}`); assertOnceOnly(f, 1);
+    assert.equal((await f.dispatch()).state, field === 'agent_session' ? 'submitted' : 'uncertain', `${phase}/${field}`); assertOnceOnly(f, 1);
   }
   for (const phase of ['snapshot', 'get']) {
     const failRead = f => { if (commands(f, 'rename').length) throw hostError('unavailable'); };

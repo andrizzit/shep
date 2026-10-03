@@ -1,7 +1,8 @@
 import { stripVTControlCharacters } from 'node:util';
 import { safeText } from './terminal.mjs';
 import { createTaskSession, taskRows, taskPresentation, matchesTask, commandSuggestions, TASK_FILTERS } from './tui-tasks.mjs';
-import { validatePrompt } from './dispatch/contracts.mjs';
+import { PATTERNS, validatePrompt } from './dispatch/contracts.mjs';
+import { sessionMatches, trustedSession } from './agent-identity.mjs';
 
 export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs you', done: 'Done', idle: 'Done', unknown: 'Starting' });
 export const FIELDS = ['provider', 'projectKey', 'subfolder', 'name', 'prompt', 'dispatch'];
@@ -115,6 +116,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     profilesLoading: true, profilesError: null, busy: null, notice: null,
     confirmation: null, confirmClose: false, resultTarget: null,
     followUp: { target: null, text: '', cursor: 0, drafts: {}, returnView: 'board' },
+    rename: { target: null, text: '', cursor: 0, error: null, returnView: 'board' },
     tasks: [], projects: [], trustRequired: [], projectsLoading: true, projectsError: null, projectWarnings: [],
     decision: null, requiredNotice: null, detailOffset: 0, projectQuery: '', pickerIndex: 0, folderPath: '', folderLoading: false,
     suggestions: [], suggestionIndex: 0, suggestionArrowMoved: false, recall: [], recallIndex: null, recallDraft: '',
@@ -133,13 +135,14 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   async function refreshModels(snapshot) {
     if (!readModel || snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
     await Promise.all(snapshot.agents.map(async agent => {
-      if (!agent.sessionId) return;
+      const sessionId = trustedSession(agent.provider, agent.sessionId);
+      if (!sessionId) return;
       let info;
-      try { info = await readModel({ provider: agent.provider, sessionId: agent.sessionId }); }
+      try { info = await readModel({ provider: agent.provider, sessionId }); }
       catch { /* Optional local metadata never blocks the board. */ }
       if (!alive) return;
       const current = state.snapshot.agents.find(item => item.id === agent.id);
-      if (!current || current.provider !== agent.provider || current.sessionId !== agent.sessionId
+      if (!current || current.provider !== agent.provider || trustedSession(current.provider, current.sessionId) !== sessionId
         || current.paneId !== agent.paneId || current.terminalId !== agent.terminalId) return;
       const previous = state.modelInfoByAgent[agent.id];
       if (previous?.model === info?.model && previous?.effort === info?.effort) return;
@@ -154,7 +157,8 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     // remain the unchanged Herdr snapshot shared with the browser.
     const modelInfoByAgent = Object.fromEntries(Object.entries(state.modelInfoByAgent).filter(([id]) => {
       const before = state.snapshot.agents.find(agent => agent.id === id), after = snapshot.agents.find(agent => agent.id === id);
-      return before && after && before.provider === after.provider && before.sessionId === after.sessionId
+      return before && after && before.provider === after.provider && trustedSession(after.provider, after.sessionId)
+        && trustedSession(before.provider, before.sessionId) === trustedSession(after.provider, after.sessionId)
         && before.paneId === after.paneId && before.terminalId === after.terminalId;
     }));
     change({ snapshot, modelInfoByAgent }); session.observe(snapshot); void refreshModels(snapshot);
@@ -206,13 +210,13 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     try { await session.submit(source); }
     finally { submitting = false; }
   }
-  const followUpKey = target => JSON.stringify([target.paneId, target.terminalId, target.provider, target.agentName ?? null, target.sessionId ?? null]);
+  const followUpKey = target => JSON.stringify([target.paneId, target.terminalId, target.provider, target.agentName ?? null, trustedSession(target.provider, target.sessionId) ?? null]);
   function followUpBlock(target) {
     const blocked = targetBlock(target);
     if (blocked) return blocked;
     if (!target.paneId || !target.terminalId) return 'Select an agent with a confirmed pane and terminal identity.';
     const current = state.snapshot.agents.find(agent => agent.id === target.id);
-    if (target.agentName != null && current.agentName !== target.agentName || target.sessionId != null && current.sessionId !== target.sessionId) return 'This agent is no longer available. Select it again from the live list.';
+    if (target.agentName != null && current.agentName !== target.agentName || !sessionMatches(target.provider, target.sessionId, current.sessionId, true)) return 'This agent is no longer available. Select it again from the live list.';
     return null;
   }
   function openFollowUp() {
@@ -239,6 +243,50 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       inform(message, submitted ? 'success' : 'warning');
     } catch {
       change({ busy: null, view: returnView }); inform(uncertain, 'warning');
+    }
+  }
+  const managedName = agent => (Object.hasOwn(agent, 'agentName') ? agent.agentName : agent.name) || null;
+  function renameBlock(target) {
+    const blocked = targetBlock(target);
+    if (blocked) return blocked;
+    if (!target.paneId || !target.terminalId || !target.provider) return 'Select an agent with a confirmed pane, terminal and provider identity.';
+    const current = state.snapshot.agents.find(agent => agent.id === target.id);
+    if (managedName(current) !== managedName(target) || !sessionMatches(target.provider, target.sessionId, current.sessionId, true)) return 'This agent is no longer available. Select it again from the live list.';
+    const task = state.tasks.find(task => !task.dismissed && matchesTask(task, target));
+    if (current.launchPending === true || task && ['queued', 'starting'].includes(task.launch.state)) return 'Wait until the agent finishes starting before renaming it.';
+    return null;
+  }
+  function openRename() {
+    const target = selected(), blocked = renameBlock(target);
+    if (blocked) { inform(blocked, 'warning'); return; }
+    const text = managedName(target) || '';
+    change({ view: 'rename', rename: { target: structuredClone(target), text, cursor: graphemes(text).length, error: null, returnView: state.view === 'detail' ? 'detail' : 'board' } });
+  }
+  async function sendRename() {
+    const { target, text: name, returnView } = state.rename;
+    const blocked = renameBlock(target);
+    const error = blocked || (!PATTERNS.agentName.test(name) ? 'Use 1–32 lowercase letters, digits, underscores or hyphens, starting with a letter.' : null);
+    if (error) { change({ rename: { ...state.rename, error } }); return; }
+    change({ busy: 'rename', rename: { ...state.rename, error: null } });
+    const uncertain = 'Rename could not be confirmed. Check the pane; Shep will not repeat it automatically.';
+    try {
+      const outcome = await controller.rename({ target: structuredClone(target), name });
+      if (!alive) return;
+      const confirmed = outcome.ok && outcome.state === 'submitted' && outcome.agentName === name
+        && outcome.paneId === target.paneId && outcome.terminalId === target.terminalId;
+      if (confirmed) {
+        const tasks = state.tasks.map(task => !task.dismissed && matchesTask(task, target)
+          ? { ...task, name, target: { ...task.target, agentName: name } } : task);
+        const snapshot = { ...state.snapshot, agents: state.snapshot.agents.map(agent => agent.id === target.id
+          && agent.paneId === target.paneId && agent.terminalId === target.terminalId && agent.provider === target.provider
+          ? { ...agent, name, agentName: name } : agent) };
+        change({ busy: null, tasks, snapshot, view: returnView });
+        inform('Agent renamed.', 'success');
+      } else if (outcome.state === 'uncertain' || outcome.ok) {
+        change({ busy: null, view: returnView }); inform(uncertain, 'warning');
+      } else change({ busy: null, rename: { ...state.rename, error: safeText(outcome.message) } });
+    } catch {
+      if (alive) { change({ busy: null, view: returnView }); inform(uncertain, 'warning'); }
     }
   }
   const submitCommand = () => { void dispatch('command'); };
@@ -277,6 +325,12 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     change({ view: 'compose', field: 'subfolder', draft: { ...state.draft, projectKey: project.key || project.root, subfolder: '' } });
   }
   function edit(input, key = {}, paste = false) {
+    if (state.view === 'rename') {
+      const edited = editText(state.rename.text, state.rename.cursor, input, paste ? {} : key, false);
+      if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) return;
+      change({ rename: { ...state.rename, text: edited.value, cursor: edited.cursor, error: null } });
+      return;
+    }
     if (state.view === 'follow-up') {
       const edited = editText(state.followUp.text, state.followUp.cursor, input, paste ? {} : key, true);
       if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) { inform('This draft exceeds 256 KiB. Paste a smaller prompt.', 'warning'); return; }
@@ -313,12 +367,18 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   function action(name, value) {
     if (name === 'quit') { onQuit(); return; }
     if (state.busy || state.requiredNotice) return;
+    if (state.view === 'rename') {
+      if (name === 'rename-send') void sendRename();
+      else if (name === 'cancel') change({ view: state.rename.returnView });
+      return;
+    }
     if (state.view === 'follow-up') {
       if (name === 'follow-up-send') void sendFollowUp();
       else if (name === 'cancel') change({ view: state.followUp.returnView });
       return;
     }
     if (['board', 'detail'].includes(state.view)) {
+      if (name === 'rename') { openRename(); return; }
       if (name === 'follow-up') { openFollowUp(); return; }
       if (name === 'clear' || name === 'clear-closed') { void session.dismiss(state.boardView === 'tasks' ? state.selectedTaskId : null, name === 'clear-closed'); return; }
     }
@@ -400,6 +460,12 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     if (key.ctrl && (input === 'c' || input === 'd')) { action('quit'); return; }
     if (state.busy) return;
     if (key.ctrl && input === 'r') { action('refresh'); return; }
+    if (state.view === 'rename') {
+      if (key.escape) action('cancel');
+      else if (key.return) action('rename-send');
+      else edit(input, key);
+      return;
+    }
     if (state.view === 'follow-up') {
       if (key.escape) action('cancel');
       else if (key.ctrl && input === 's') action('follow-up-send');
@@ -477,6 +543,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       else if (key.return && state.view === 'detail') action('focus');
       else if (input === 'x' && state.view === 'detail') action('close');
       else if (input === 'p' && state.view === 'detail') action('follow-up');
+      else if (input === 'e' && state.view === 'detail') action('rename');
       else if (input === 'c' && state.view === 'detail') action('clear');
       else if (input === 'C' && state.view === 'detail') action('clear-closed');
       else if (input === 'q') action('quit');
@@ -493,6 +560,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     else if (input === 'r') action('refresh');
     else if (input === 'x') action('close');
     else if (input === 'p') action('follow-up');
+    else if (input === 'e') action('rename');
     else if (input === 'c') action('clear');
     else if (input === 'C') action('clear-closed');
     else if (key.return) action('focus');
@@ -510,7 +578,7 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     action, key, paste: text => {
       if (state.busy) return;
       if (state.view === 'board' && text.startsWith('/')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
-      else if (['compose', 'search', 'command', 'picker', 'folder', 'follow-up'].includes(state.view)) edit(text, {}, true);
+      else if (['compose', 'search', 'command', 'picker', 'folder', 'follow-up', 'rename'].includes(state.view)) edit(text, {}, true);
     }, ready,
     selected, targetBlock, pickerItems, getTasks: session.getTasks, showNotice: inform, destroy: () => { session.destroy(); alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
 }

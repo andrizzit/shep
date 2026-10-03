@@ -166,7 +166,7 @@ test('only observed activity of the matching agent resolves startup attention on
     f.publish({ agents: [f.agent(task, 'idle', { sessionId: 'original' })] });
     assert.equal(label(), 'Needs you'); assert.notEqual(f.model.getTasks()[0].observedActivity, true);
     f.publish({ agents: [f.agent(task, 'working', { sessionId: 'replacement' })] });
-    assert.equal(label(), 'Needs you'); assert.notEqual(f.model.getTasks()[0].observedActivity, true);
+    assert.equal(label(), 'Working'); assert.equal(f.model.getTasks()[0].observedActivity, true);
     f.publish({ agents: [f.agent(task, 'working', { sessionId: 'original' })] });
     assert.equal(label(), 'Working'); assert.equal(f.model.getTasks()[0].observedActivity, true);
     f.publish({ agents: [f.agent(task, 'idle', { sessionId: 'original' })] });

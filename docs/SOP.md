@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.8.1, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.8.2, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, explicit worktree placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -167,9 +167,9 @@ Press **g** to switch views. Tasks are grouped by project and show this run's di
 
 Rows lead with a bold name, status and dimmed provider. Needs you sorts first within its group, Working is bright and Done muted. A second line appears only for an attention reason or finished-task changes. Short differing folders replace repeated full paths; details keep the full path and show IDs at the bottom.
 
-Terminal rows align name, status, provider, model, effort and folder or age in columns. For **Claude and Grok**, model and effort use separate dimmed cells; missing cells preserve later columns. Every Claude family uses the same short format, such as `opus 5.5` or `fable 5.1`. Open details to see full IDs. Narrow panes drop effort and model first, then folder or age, preserving name and status; details keep the fields. The browser snapshot is unchanged.
+Terminal rows align name, status, provider, model, effort and folder or age in columns. For **Claude and Grok**, model and effort use separate dimmed cells; missing cells preserve later columns. Every Claude family uses the same short format, such as `opus 5.5` or `fable 5.1`. Open details to see full IDs. At 110 columns or wider the list always uses 70% of the pane, keeping the divider still when model details appear. Gaps grow with the list's width. Narrow panes drop effort and model first, then folder or age, preserving name and status; details keep the fields. The browser snapshot is unchanged.
 
-Model details need a Herdr session integration. Install the matching integration yourself with `herdr integration install claude`, `herdr integration install codex` or `herdr integration install grok`, then start a new agent. Agents started before installation may lack a session ID. **Codex model details are deferred in this checkpoint:** its approved live probe still reported no session ID after trust was answered. Re-check its `agent_session` after the next Codex or Herdr update. Its existing dispatch and monitoring are unchanged.
+Model details need a Herdr session integration. Install the matching integration yourself with `herdr integration install claude` or `herdr integration install grok`, then start a new agent. Agents started before installation may lack a session ID. **Codex model and effort are not shown:** Herdr's current Codex hooks run in a shared `codex app-server`, which can report session IDs to the wrong pane. Shep ignores those IDs for identity and model lookup until [Herdr](https://herdr.dev/) fixes its integration. Re-check after a Codex or Herdr update. Codex dispatch and monitoring remain available; Shep does not guess session IDs.
 
 Shep uses only the exact Herdr session ID. It reads at most the final 64 KiB of `~/.claude/projects/*/<session-id>.jsonl` (assistant `message.model`/`effort`) or `~/.grok/sessions/*/<session-id>/chat_history.jsonl` (assistant `model_id`/`reasoning_effort`). Only those fields are extracted; conversation text is not retained. The reader caches identity, size and modification time and refreshes at most every ten seconds. It reuses a safely validated session path instead of walking directories each refresh. Invalid or partial lines are skipped; the last verified fields remain when the same file grows without a complete assistant record in its tail. A replacement, unreadable or unsafe file cannot inherit them. An unrecorded selection between turns cannot appear yet. There are no provider-folder writes or new history files. Unsafe IDs, symlinks, ambiguous sessions or logs without verified fields produce no model details; Shep never uses a folder match or configuration default.
 
@@ -202,9 +202,12 @@ To continue the same conversation from Shep, select the task or agent and press 
 
 A submitted follow-up shows “Follow-up submitted”. This uses native submission without an activity wait; it does not guarantee the text ran. If the agent needs input, nothing is sent and Shep says “The agent is waiting for input in its pane. Answer it there.” On an uncertain result, inspect the agent before sending again. Shep never retries automatically. Own-pane, stale/demo and identity protections apply to follow-ups too.
 
+To rename an agent, select it in Tasks or Agents and press **e Rename**, also available in details. The one-line editor is prefilled with the current name, or empty for unnamed agents opened outside Shep. Names start with `a`–`z`, then use `a`–`z`, `0`–`9`, `_` or `-`, up to 32 characters. **Enter** sends the rename once; **Esc** cancels. Invalid names show an inline error. Shep rechecks the exact pane, terminal and provider before renaming and confirms with a fresh read. Its own pane, stale/demo data and agents mid-startup cannot be renamed. A tracked task keeps matching its renamed agent.
+
 | Key | Task or agent action |
 | --- | --- |
 | `p` | Open the selected agent's follow-up editor |
+| `e` | Rename the selected agent; Enter saves, Esc cancels |
 | `Ctrl+S` / `Esc` in that editor | Send once / cancel and keep the draft |
 | `c` | Clear the selected closed or failed task |
 | `C` | Clear all eligible closed and failed tasks |
@@ -351,7 +354,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.8.1.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.8.2.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 

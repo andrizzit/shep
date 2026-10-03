@@ -83,8 +83,9 @@ test('initial global done and idle snapshots remain silent', () => {
 for (const field of ['provider', 'agentName', 'sessionId']) test(`same-terminal replacement with changed or missing ${field} cannot notify an obsolete task`, () => {
   for (const status of ['done', 'idle', 'blocked']) for (const missing of [false, true]) {
     const f = fixture();
-    Object.assign(f.task.target, { provider: 'codex', agentName: 'original-agent', sessionId: 'original-session' });
-    Object.assign(f.snapshot.agents[0], { provider: 'codex', agentName: 'original-agent', name: 'original-agent', sessionId: 'original-session' });
+    const provider = field === 'sessionId' ? 'claude' : 'codex';
+    Object.assign(f.task.target, { provider, agentName: 'original-agent', sessionId: 'original-session' });
+    Object.assign(f.snapshot.agents[0], { provider, agentName: 'original-agent', name: 'original-agent', sessionId: 'original-session' });
     f.tick();
     const replacement = f.snapshot.agents[0]; replacement.status = status;
     if (missing) delete replacement[field]; else replacement[field] = 'replacement';
@@ -155,14 +156,14 @@ test('real task outcomes retain conservative notifications regardless of snapsho
   }
 });
 
-function blockedLifecycle({ state = 'submitted', settings = {}, boundAtStartup = false, sessionId, status = 'blocked', code, message = state } = {}) {
+function blockedLifecycle({ state = 'submitted', settings = {}, boundAtStartup = false, sessionId, status = 'blocked', code, message = state, provider = 'codex' } = {}) {
   const at = '2026-09-27T12:00:00.000Z', project = makeProject();
-  const spec = { kind: 'dispatch', agents: [{ provider: 'codex', profile: null }], project, mode: 'auto', modeIntent: 'auto',
+  const spec = { kind: 'dispatch', agents: [{ provider, profile: null }], project, mode: 'auto', modeIntent: 'auto',
     subfolder: '', template: null, task: 'Review code', inputTask: 'Review code', command: '/dispatch Review code' };
   const placement = { projectKey: project.key, root: project.root, mode: 'auto', subfolder: '', label: 'Review code', placementStyle: 'tab' };
   let task = createTask(spec, { id: 'review', attemptId: 'attempt', at, name: 'review-codex', placement });
   task = transition(task, { type: 'progress', event: { taskId: task.id, attemptId: task.attemptId, stage: 'target', at } });
-  const agent = { paneId: 'new-pane', terminalId: 'new-terminal', provider: 'codex', name: task.name,
+  const agent = { paneId: 'new-pane', terminalId: 'new-terminal', provider, name: task.name,
     agentName: task.name, sessionId: sessionId ?? null, status, focused: false };
   const snapshot = { mode: 'live', source: { state: 'connected' }, agents: [] }, calls = [];
   const bind = () => {
@@ -202,7 +203,7 @@ test('first-bound blocked outcomes honor focus suppression without replaying the
 
 test('first-bound blocked outcomes require every supplied captured identity field', () => {
   for (const state of ['submitted', 'uncertain']) for (const field of ['paneId', 'terminalId', 'provider', 'agentName', 'sessionId']) for (const missing of [false, true]) {
-    const f = blockedLifecycle({ state, sessionId: 'known-session' });
+    const f = blockedLifecycle({ state, sessionId: 'known-session', provider: field === 'sessionId' ? 'claude' : 'codex' });
     f.bind();
     if (missing) delete f.agent[field]; else f.agent[field] = 'replacement';
     if (field === 'agentName') { if (missing) delete f.agent.name; else f.agent.name = 'replacement'; }
@@ -265,7 +266,7 @@ test('stalled-prompt attention preserves startup, focus, enabled, demo and disco
 
 test('stalled-prompt attention rejects a replacement occupant before attributing its idle status', () => {
   for (const field of ['provider', 'agentName', 'sessionId']) for (const missing of [false, true]) {
-    const f = blockedLifecycle({ ...stalledOutcome, sessionId: 'known-session' });
+    const f = blockedLifecycle({ ...stalledOutcome, sessionId: 'known-session', provider: field === 'sessionId' ? 'claude' : 'codex' });
     f.bind();
     if (missing) delete f.agent[field]; else f.agent[field] = 'replacement';
     if (field === 'agentName') { if (missing) delete f.agent.name; else f.agent.name = 'replacement'; }
