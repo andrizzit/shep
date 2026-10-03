@@ -9,7 +9,7 @@ const PROMPT_ACTIVITY_TIMEOUT_MS = 6000;
 // receipt stays attached to failed/uncertain outcomes and remote panes stay open.
 export function createLaunchRunner(deps) {
   const { assertLive, hasExecutable, KINDS, pinned, fail, randomHex, createTarget, observe,
-    fresh, directory, operationLocks, invoke, compareAgent, checkedAgent, outcome,
+    fresh, directory, operationLocks, operation, invoke, compareAgent, checkedAgent, outcome,
     reservations, errorCode, trusted, NEEDS_INPUT, UNCERTAIN, messageFor, delivery } = deps;
   async function launch(job) {
     const request = job.request;
@@ -74,14 +74,35 @@ export function createLaunchRunner(deps) {
     } catch (error) {
       const code = errorCode(error);
       // Herdr waits for a ready prompt even when startup argv already began the
-      // task. A timeout may therefore mean it is working. Read exact identity
-      // once to classify that state; never repeat startup or send the task again.
+      // task. A timeout may therefore mean it is working. Verify exact identity
+      // to classify that state; never repeat startup or send the task again.
       if (atLaunch && job.stage === 'start' && code === 'timeout' && state.pane) {
         try {
-          const current = await checkedAgent({ paneId: state.pane.pane_id, terminalId: state.pane.terminal_id,
-            provider: request.provider, agentName: state.name });
-          if (current.agent.agent_status === 'working') return finish(outcome('submitted', 'Agent started with its task. Herdr will report its live status.', details()));
-          if (current.agent.agent_status === 'blocked') return finish(outcome('needs_input', 'Needs you. Check the pane to finish startup; Shep will not resend the task.', { ...details(), code: 'agent_not_ready' }));
+          const target = { paneId: state.pane.pane_id, terminalId: state.pane.terminal_id,
+            provider: request.provider, agentName: state.name };
+          const current = await operation(target, async () => {
+            try { return await checkedAgent(target); }
+            catch (error) { if (errorCode(error) !== 'changed_target') throw error; }
+            // Herdr may discard its managed name when startup times out. Only
+            // this attempt's created pane may receive that missing name back.
+            const receipt = state.created?.panes.find(pane => pane.paneId === target.paneId && pane.terminalId === target.terminalId);
+            if (!receipt) fail('changed_target');
+            const unnamed = { ...target, agentName: undefined };
+            const observed = await checkedAgent(unnamed);
+            const pane = observed.snapshot.panes.find(pane => pane.pane_id === target.paneId);
+            const first = observed.snapshot.agents.find(agent => agent.pane_id === target.paneId);
+            const missing = name => name === undefined || name === null || name === '';
+            if (pane.tab_id !== receipt.tabId || pane.workspace_id !== receipt.workspaceId
+              || !missing(first.name) || !missing(observed.agent.name)) fail('changed_target');
+            if (first.agent_session?.kind === 'id') unnamed.sessionId = first.agent_session.value;
+            compareAgent(unnamed, observed.agent);
+            if (observed.agent.agent_session?.kind === 'id') target.sessionId = observed.agent.agent_session.value;
+            const renamed = await invoke(['agent', 'rename', target.paneId, target.agentName]);
+            compareAgent(target, renamed.result?.agent);
+            return checkedAgent(target);
+          });
+          if (current.agent?.agent_status === 'working') return finish(outcome('submitted', 'Agent started with its task. Herdr will report its live status.', details()));
+          if (current.agent?.agent_status === 'blocked') return finish(outcome('needs_input', 'Needs you. Check the pane to finish startup; Shep will not resend the task.', { ...details(), code: 'agent_not_ready' }));
         } catch { /* Unobservable or replaced targets remain uncertain. */ }
       }
       if (error.trust && job.stage === 'target' && !job.trustRetry && !trusted(error.trust.root)) {

@@ -124,7 +124,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   const messageFor = code => code === 'prelaunch_notice_failed' ? DISPATCH_MESSAGES.prelaunchNoticeFailed : MESSAGES[code] ?? 'The action could not be completed safely. Refresh and inspect Herdr.';
   const trusted = root => (getConfig()?.worktrees?.trustedRepos ?? []).includes(root);
   const jobKey = request => JSON.stringify([request.taskId, request.attemptId]);
-  const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove'].includes(argv[1]);
+  const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove', 'rename'].includes(argv[1]);
 
 
   function assertContext() {
@@ -395,7 +395,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     registry, gitRead, fs, pinned, trusted, reservations, receipts, operationLocks, observe, randomHex, getConfig,
     fail, ControlError, errorCode, present });
   const launch = createLaunchRunner({ assertLive, hasExecutable, KINDS, pinned, fail, randomHex, delivery,
-    ...targetService, observe, fresh, operationLocks, invoke, compareAgent, checkedAgent, outcome,
+    ...targetService, observe, fresh, operationLocks, operation, invoke, compareAgent, checkedAgent, outcome,
     reservations, errorCode, trusted, NEEDS_INPUT, UNCERTAIN, messageFor });
   const { listWorktrees, removeWorktree } = createCleanupOperations({ assertLive, directory: targetService.directory,
     invoke, trusted, fail, operation, receipts, pinned, locked, getControlSnapshot, fs, outcome,

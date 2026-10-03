@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.7, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.7.1, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, explicit worktree placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -113,6 +113,8 @@ For Claude, Codex and Grok, an eligible task is one literal argument to the agen
 
 **Needs you** means Herdr reported a block/setup question or Shep could not confirm delivery. Open the pane and handle the provider's dialog. The native reply-only checks confirmed Claude and Codex retained their startup task through the owner's trust confirmation and replied without retyping. Herdr nevertheless reported Codex idle while its trust screen was visible. Startup-delivered tasks that remain idle without observed work or completion now show Needs you, with one attention notification after about five seconds. A very fast completed reply can also trigger this state if Shep missed its activity; inspect the pane. Keep providers signed in and updated; the typed path retains its startup-screen limitation. Shep never reads screens to guess readiness or answers dialogs.
 
+A startup timeout can remove Herdr's managed agent name. Shep verifies the original pane, terminal and provider, restores an absent name once, and reads the agent again. A matching working agent stays tracked through completion and its finished notification. A different name or changed identity stays uncertain; there is no automatic retry or task resend.
+
 Agent and project suggestions appear vertically below the command line and scroll with the highlight. Click a row to accept it. Up/Down chooses with wraparound; Enter accepts only after an arrow move and otherwise submits. Tab accepts, Shift+Tab cycles. With no suggestions, Up/Down recalls commands from this run and Esc restores the displaced draft.
 
 ## 4. Write a useful task
@@ -137,7 +139,7 @@ Main-folder dispatch shares the checkout. Use +wt for isolation, or coordinate f
 2. Press **n New agent** (or **n New** in a narrow pane) to open the composer.
 3. Move between fields with **Tab** or **Shift+Tab**.
 4. In the focused provider field, choose from the vertical list of installed agents with **↑/↓** or **←/→**; **Enter** or **Tab** advances. Open the project picker. Filter the list, choose a project, or choose **Other folder…** and enter an existing absolute path.
-5. Set an optional subfolder and task name. Check the placement preview and working directory.
+5. Set an optional subfolder and task name. The Default toolbar reflects the composer provider; slash commands retain their Codex default. Check the placement preview and working directory.
 6. Press **Esc** to retain your draft and return to the overview.
 
 The composer offers one provider, project, optional subfolder/name, task and launch action. For a longer prompt, type or paste into the **Task** field. **Enter adds a newline there**; **Ctrl+S** submits the composer. You can also select its Dispatch button.
@@ -343,7 +345,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.7.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.7.1.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 

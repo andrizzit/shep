@@ -7,7 +7,7 @@
 
 Shep is an [Ink](https://github.com/vadimdemedes/ink) terminal interface for dispatching and managing coding agents inside [Herdr](https://herdr.dev/). Run `shep`, then type `/dispatch claude@folio: add unit tests` to choose an agent, project and task. Follow tasks by project or agents by provider, see who needs input, and focus or close agent panes from the same interface.
 
-This branch provides **0.4.0-checkpoint.7**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
+This branch provides **0.4.0-checkpoint.7.1**, a local, unpublished preview of project-aware dispatch. Fan-out, templates, named profiles, persisted task history, worktree cleanup controls and additional shell subcommands are deferred.
 
 Keep it beside your chat in a terminal pane, or open its browser companion at **http://localhost:4317**. Both views show agent metadata from your current Herdr instance; the task board stays private to the terminal interface.
 
@@ -64,7 +64,7 @@ The public default branch may still be 0.3.0 while this preview is unpushed. To 
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.7.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.7.1.tgz --offline --ignore-scripts --no-audit --no-fund
 ```
 
 This installs the `shep` and `shep-run` commands into `$HOME/.local/bin`, and copies the app and browser assets into `$HOME/.local/lib/node_modules/shep-herdr-plugin`. The package's internal name is `shep-herdr-plugin`; the app and command are **Shep** and **`shep`**.
@@ -107,7 +107,7 @@ A clear prefix can omit the colon: `/dispatch claude@folio add unit tests`, `/di
 
 To request a project subfolder, press **n**, choose the project, and enter a relative path such as `src/api` in **Subfolder**. Command prefixes accept project names or aliases, not subfolder paths. Suggestions appear in a vertical list below the command line, with fewer visible rows in compact panes. Click a row to accept it. **↑/↓** move through visible suggestions and wrap; **Enter** accepts a suggestion only after an arrow moved the highlight. Otherwise Enter submits. **Tab** accepts and **Shift+Tab** cycles suggestions. Without suggestions, arrows recall commands from this run; **Esc** restores the displaced draft.
 
-Press **n New agent** (or **n New** in a narrow pane) for the composer: provider, project or **Other folder…**, subfolder, optional name and multiline prompt. When the provider field is focused, its vertical list shows installed agents. **↑/↓** or **←/→** change the selection; **Enter** or **Tab** moves to the next field. Review the proposed location before dispatch. Herdr starts a worktree at its repository root; when a requested subfolder cannot apply, Shep shows that notice before launch.
+Press **n New agent** (or **n New** in a narrow pane) for the composer: provider, project or **Other folder…**, subfolder, optional name and multiline prompt. When the provider field is focused, its vertical list shows installed agents. **↑/↓** or **←/→** change the selection; **Enter** or **Tab** moves to the next field. The Default toolbar shows the current composer provider; entering a slash command shows its Codex default. Review the proposed location before dispatch. Herdr starts a worktree at its repository root; when a requested subfolder cannot apply, Shep shows that notice before launch.
 
 Dispatches use the project's main folder even when another agent is working there. Coordinate edits in a shared checkout. Use `/dispatch codex@shep+wt: your task` to create a worktree; a project configured with `isolation: "always"` also forces one. `+here` selects the main folder unless that project setting forces worktrees. A worktree's detail shows its path and manual removal command, `herdr worktree remove --workspace <id>`. Preserve changes before removing it. **W** cleanup, fan-out, named profiles and templates remain deferred.
 
@@ -116,6 +116,8 @@ For Claude, Codex and Grok, Shep gives eligible tasks to the agent **when it sta
 After you submit, Shep returns to the board with the new task selected as **Starting** while startup continues. You can launch another task straight away. **Enter** opens the new agent once its pane is available. A late startup result updates its row without moving you out of another task or editor. The double-Enter guard prevents a single submission from starting two agents.
 
 If an agent needs setup or a prompt isn't picked up, the terminal shows **Needs you** and sends one attention notification under your existing settings. Open the pane and answer the provider's own dialog. With startup delivery Shep includes the task in the start arguments and does not retype it after a dialog. An uncertain result does not confirm receipt; inspect the pane before manually sending anything. Herdr can report idle while a trust screen is visible. For startup delivery, an agent that is idle before Shep has observed any work or completion shows **Needs you**; if that lasts about five seconds, Shep sends one attention notification. A very fast reply can also show Needs you if its activity was missed. Open the pane to check. On the typed path, startup screens can still receive or lose input; keep CLIs signed in and updated. Shep never parses screens, approves dialogs or resends an uncertain task.
+
+If startup times out while the agent is still working, Shep restores a missing managed name once after verifying the original pane, terminal and provider. The task then keeps tracking the agent and its completion. A different name or changed identity stays uncertain; the task is never resent.
 
 Startup-path Needs you clears the submitted draft; the typed path keeps unsent text. Saved command recall can recover a failed launch’s original command.
 

@@ -472,7 +472,8 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
   const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
   const clearableTasks = state.tasks.some(task => !task.dismissed && (task.live.status === 'closed' || task.launch.state === 'failed'));
-  const defaults = `Codex · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n New agent → Project'}`;
+  const defaultProvider = state.view === 'command' ? 'codex' : state.draft.provider;
+  const defaults = `${defaultProvider ? providerName(defaultProvider) : 'Choose an agent'} · ${state.projectsLoading ? 'Projects loading…' : project?.name || 'Choose a project'} · ${project?.root || state.projectsError || 'n New agent → Project'}`;
   const allRows = taskRows({ ...state, query: '', filter: 'all' });
   const needsYou = allRows.filter(attention).length;
   const working = allRows.filter(row => taskPresentation(row) === 'working').length;
