@@ -88,38 +88,46 @@ function Badge({ status }) {
     bold: label === 'Needs you' || status === 'working' }, text));
 }
 function shortModel(model) {
-  const claude = /^claude-(opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?:-|$)/.exec(model || '');
-  return claude ? `${claude[1]} ${claude[2]}${claude[3] ? '.' + claude[3] : ''}` : model;
+  const claude = /^claude-(.+?)-(\d+)(?:[-.](\d{1,2}))?(?:-|$)/.exec(model || '');
+  return claude ? `${claude[1]} ${claude[2]}${claude[3] ? '.' + claude[3] : ''}`
+    : model?.startsWith('grok-') ? model.replaceAll('-', ' ') : model;
 }
 const modelInfo = (state, agent) => agent && state.modelInfoByAgent?.[agent.id];
 const modelDetails = (state, agent) => {
   const info = modelInfo(state, agent);
   return [...(info?.model ? [`Model: ${info.model}`] : []), ...(info?.effort ? [`Effort: ${info.effort}`] : [])];
 };
-function NamedRow({ state, row, active, width }) {
+function rowCells(state, row) {
+  const { name, pane } = rowName(row), info = modelInfo(state, row.agent), status = taskPresentation(row);
+  return { name: name + (pane ? ' ' + pane : ''), status: TASK_LABELS[status] === 'Needs you' ? '! Needs you' : TASK_LABELS[status] || 'Starting',
+    provider: providerName(row.task?.agent.provider || row.agent?.provider), model: shortModel(info?.model) || '', effort: info?.effort || '',
+    folder: rowFolder(row) || elapsed(row.elapsedMs) };
+}
+function rowColumns(state, rows, width) {
+  const values = rows.map(row => rowCells(state, row));
+  const widest = (field, cap) => Math.min(cap, Math.max(0, ...values.map(value => displayWidth(value[field]))));
+  const columns = { name: widest('name', 24), status: widest('status', 11), provider: widest('provider', 12),
+    model: width < 50 ? 0 : widest('model', 24), effort: width < 50 ? 0 : widest('effort', 8), folder: widest('folder', 22) };
+  const minimumName = Math.min(columns.name, 16);
+  const used = name => 3 + name + Object.entries(columns).filter(([key]) => key !== 'name').reduce((sum, [, size]) => sum + (size ? size + 1 : 0), 0);
+  // Optional fields give way in this order; every visible row shares the same
+  // widths, including its blank cells. Useful names and statuses lead the row.
+  for (const field of ['effort', 'model', 'folder']) if (used(columns.name) > width) columns[field] = 0;
+  if (used(minimumName) > width) columns.provider = Math.max(0, columns.provider - (used(minimumName) - width));
+  columns.name = Math.max(1, Math.min(columns.name, width - (used(0))));
+  return columns;
+}
+function NamedRow({ state, row, active, width, columns }) {
   const status = taskPresentation(row), { name, pane } = rowName(row);
-  const provider = truncate(providerName(row.task?.agent.provider || row.agent?.provider), width < 50 ? 6 : 12);
-  const info = modelInfo(state, row.agent);
-  // The small pane keeps its existing name, status and folder hierarchy.
-  const fields = width >= 50 ? [shortModel(info?.model), info?.effort].filter(Boolean).join(' · ') : '';
-  const detail = rowFolder(row) || elapsed(row.elapsedMs);
-  const badge = TASK_LABELS[status] === 'Needs you' ? '! Needs you' : TASK_LABELS[status] || 'Starting';
-  const metaWidth = Math.min(22, Math.floor(width / 4), width - 3 - displayWidth(badge) - displayWidth(provider) - 3 - 8);
-  const metadata = detail && metaWidth >= 4 ? truncate(detail, metaWidth) : '';
-  const originalNameWidth = Math.max(3, width - 3 - displayWidth(badge) - displayWidth(provider) - 2 - (metadata ? displayWidth(metadata) + 1 : 0));
-  const usedNameWidth = Math.min(originalNameWidth, displayWidth(name) + (pane ? displayWidth(pane) + 1 : 0));
-  const extraRoom = originalNameWidth - usedNameWidth;
-  const modelLabel = fields && extraRoom >= 5 ? ' · ' + truncate(fields, extraRoom - 3) : '';
-  const providerLabel = provider + modelLabel;
-  const nameWidth = originalNameWidth - displayWidth(modelLabel);
-  const shownName = truncate(name, nameWidth);
-  const paneWidth = Math.max(0, nameWidth - displayWidth(shownName) - 1);
+  const cells = rowCells(state, row);
+  const shownName = truncate(name, columns.name);
+  const paneWidth = Math.max(0, columns.name - displayWidth(shownName) - 1);
   return h(Box, { width, height: 1, flexShrink: 0 },
     line(`${attention(row) ? '▌' : active ? '›' : status === 'working' ? '●' : '○'}${attention(row) && active ? '›' : ' '} `, { color: taskColor(status), bold: attention(row) }),
-    h(Box, { width: nameWidth, flexShrink: 0 }, h(Text, { wrap: 'truncate-end' }, h(Text, { color: C.ink, bold: true }, shownName),
+    h(Box, { width: columns.name, flexShrink: 0 }, h(Text, { wrap: 'truncate-end' }, h(Text, { color: C.ink, bold: true }, shownName),
       pane && paneWidth > 0 ? h(Text, { color: C.faint }, ' ' + truncate(pane, paneWidth)) : null)),
-    line(' '), h(Badge, { status }), line(' ' + providerLabel, { color: C.faint }),
-    metadata && line(' ' + metadata, { color: C.faint }));
+    ...['status', 'provider', 'model', 'effort', 'folder'].filter(field => columns[field]).flatMap(field => [line(' ', { key: `${field}-gap` }),
+      h(Box, { key: field, width: columns[field], height: 1, flexShrink: 0 }, field === 'status' ? h(Badge, { status }) : line(truncate(cells[field], columns[field]), { color: C.faint }))]));
 }
 export function listRows(state) {
   const agents = visibleAgents(state);
@@ -145,6 +153,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
   const rows = listRows(state);
   const capacity = Math.max(1, height - 4);
   const shown = rows.slice(offset, offset + capacity);
+  const columns = rowColumns(state, shown.filter(row => row.type === 'agent').map(row => row.row), width - 4);
   const selected = state.snapshot.agents.find(agent => agent.id === state.selectedId);
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
     h(Box, { height: 1, justifyContent: 'space-between', flexShrink: 0 }, line('YOUR AGENTS', { color: C.muted, bold: true }), line(`${visibleAgents(state).length} shown`, { color: C.faint })),
@@ -153,7 +162,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
       if (row.type === 'empty') return h(Box, { key: `e-${row.provider}`, height: 1, flexShrink: 0 }, line('  No agents', { color: C.faint }));
       const active = selected?.id === row.agent.id;
       return h(Click, { key: `${row.type}-${row.agent.id}`, registry, id: `${row.type}-${row.agent.id}`, action: () => model.action('select', row.agent.id), width: '100%', height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
-        row.type === 'agent' ? h(NamedRow, { state, row: row.row, active, width: width - 4 }) : line(`  ${rowSupplement(row.row)}`, { color: attention(row.row) ? C.blocked : C.faint }));
+        row.type === 'agent' ? h(NamedRow, { state, row: row.row, active, width: width - 4, columns }) : line(`  ${rowSupplement(row.row)}`, { color: attention(row.row) ? C.blocked : C.faint }));
     }),
     h(Box, { flexGrow: 1 }),
     compactActions ? h(Box, { gap: 1, flexShrink: 0 },
@@ -169,13 +178,15 @@ export function boardRows(state) {
 function TaskList({ state, model, width, height, registry, offset = 0, compactActions = false }) {
   const rows = boardRows(state);
   const capacity = Math.max(1, height - 4);
+  const shown = rows.slice(offset, offset + capacity);
+  const columns = rowColumns(state, shown.filter(item => item.type === 'task').map(item => item.row), width - 4);
   return h(Box, { width, height, borderStyle: 'round', borderColor: C.border, flexDirection: 'column', paddingX: 1, overflow: 'hidden' },
     h(Box, { height: 1, flexShrink: 0, justifyContent: 'space-between' }, line('TASKS', { color: C.muted, bold: true }), line(`${taskRows(state).length} shown`, { color: C.faint })),
-    ...rows.slice(offset, offset + capacity).map(item => {
+    ...shown.map(item => {
       if (item.type === 'project') return line(`${item.group.name} (${item.group.rows.length})`, { key: `group-${item.group.key}`, color: C.orange, bold: true });
       const row = item.row, active = row.id === state.selectedTaskId;
       return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('select-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
-        item.type === 'task' ? h(NamedRow, { state, row, active, width: width - 4 }) : line(`  ${rowSupplement(row)}`, { color: attention(row) ? C.blocked : C.faint }));
+        item.type === 'task' ? h(NamedRow, { state, row, active, width: width - 4, columns }) : line(`  ${rowSupplement(row)}`, { color: attention(row) ? C.blocked : C.faint }));
     }),
     !rows.length && line(state.projectsLoading ? 'Projects loading…' : state.query || state.filter !== 'all' ? 'No matching tasks.' : 'No tasks yet. /dispatch starts one.', { color: C.faint }),
     h(Box, { flexGrow: 1 }),
@@ -477,7 +488,11 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
   const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
   const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
-  const listWidth = split ? Math.floor(width * .52) : width;
+  const visibleModel = boardRows(state).slice(offset, offset + Math.max(1, bodyHeight - 4)).some(item => {
+    const info = modelInfo(state, item.type === 'task' ? item.row.agent : item.type === 'agent' ? item.agent : null);
+    return info?.model || info?.effort;
+  });
+  const listWidth = split ? Math.floor(width * (width >= 110 && visibleModel ? .7 : .52)) : width;
   const rightWidth = width - listWidth;
   const activePanel = state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
   const List = state.boardView === 'tasks' ? TaskList : AgentList;

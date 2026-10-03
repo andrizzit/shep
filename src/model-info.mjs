@@ -58,13 +58,29 @@ async function locate(home, adapter, sessionId) {
           && await safePath(canonical, child, true)) await visit(child, level + 1);
       } else if (entry.isFile() && adapter.filename(entry.name, sessionId)) {
         const info = await safePath(canonical, child);
-        if (info) matches.push({ path: child, info });
+        if (info) matches.push({ path: child, root: canonical, info });
       }
       if (matches.length > 1) return;
     }
   }
   await visit(location, 0);
   return matches.length === 1 ? matches[0] : null;
+}
+
+async function cachedPath(previous) {
+  if (!previous?.path || !previous.root || !contained(previous.root, previous.path)) return null;
+  try {
+    let directory = previous.root;
+    if (!await safePath(previous.root, directory, true)) return null;
+    const components = relative(previous.root, previous.path).split(sep);
+    for (const component of components.slice(0, -1)) {
+      directory = join(directory, component);
+      if (!await safePath(previous.root, directory, true)) return null;
+    }
+    const info = await safePath(previous.root, previous.path);
+    return info && info.dev === previous.dev && info.ino === previous.ino
+      ? { path: previous.path, root: previous.root, info } : null;
+  } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
 async function tailFields(file, info, adapter) {
@@ -76,17 +92,18 @@ async function tailFields(file, info, adapter) {
   // outside this bounded tail or retain any text after extracting the fields.
   if (offset) {
     const boundary = text.indexOf('\n');
-    if (boundary < 0) return undefined;
+    if (boundary < 0) return { found: false };
     text = text.slice(boundary + 1);
   }
-  let result;
+  let result, found = false;
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
-    const item = JSON.parse(line);
+    let item;
+    try { item = JSON.parse(line); } catch { continue; }
     const next = adapter.record(item);
-    if (next !== null) result = Object.keys(next).length ? next : undefined;
+    if (next !== null) { found = true; result = Object.keys(next).length ? next : undefined; }
   }
-  return result;
+  return { found, value: result };
 }
 
 /** Read only provider-reported fields for an exact Herdr session identity. */
@@ -103,22 +120,24 @@ export function createModelReader({ home = homedir(), now = Date.now } = {}) {
       const value = previous.pending ? await previous.pending : previous.value;
       return value && { ...value };
     }
-    const entry = { checkedAt, value: undefined };
+    const entry = { checkedAt, value: undefined, ...(previous?.path ? { path: previous.path, root: previous.root, dev: previous.dev, ino: previous.ino } : {}) };
     cache.set(key, entry);
     entry.pending = (async () => {
       try {
-        const match = await locate(home, adapter, sessionId);
-        if (!match) return undefined;
+        const match = await cachedPath(previous) || await locate(home, adapter, sessionId);
+        if (!match) { delete entry.path; delete entry.root; return undefined; }
+        entry.path = match.path; entry.root = match.root; entry.dev = match.info.dev; entry.ino = match.info.ino;
         // A stat-only cache hit would keep showing fields after read access is
         // revoked. Open safely on each refresh, without rereading unchanged logs.
         const file = await open(match.path, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
           const current = await file.stat();
-          if (!current.isFile() || current.dev !== match.info.dev || current.ino !== match.info.ino
-            || current.size !== match.info.size || current.mtimeMs !== match.info.mtimeMs) return undefined;
-          entry.path = match.path; entry.size = current.size; entry.mtimeMs = current.mtimeMs;
-          if (previous?.path === entry.path && previous.size === entry.size && previous.mtimeMs === entry.mtimeMs) return previous.value;
-          return await tailFields(file, current, adapter);
+          if (!current.isFile() || current.dev !== match.info.dev || current.ino !== match.info.ino) return undefined;
+          entry.size = current.size; entry.mtimeMs = current.mtimeMs;
+          const sameFile = previous?.dev === current.dev && previous?.ino === current.ino;
+          if (sameFile && previous.size === entry.size && previous.mtimeMs === entry.mtimeMs) return previous.value;
+          const tail = await tailFields(file, current, adapter);
+          return tail.found ? tail.value : sameFile && current.size > previous.size ? previous.value : undefined;
         } finally { await file.close(); }
       } catch { return undefined; }
     })();

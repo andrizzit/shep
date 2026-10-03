@@ -72,7 +72,7 @@ test('checkpoint8 missing data, unreadable paths, malformed tails and unsupporte
   await f.put('claude', [{ type: 'assistant', message: { role: 'user', model: 'spoof' }, effort: 'high' }]);
   assert.equal(await read()({ provider: 'claude', sessionId: 'session-1' }), undefined);
   await f.put('claude', [claude(), '{"type":"assistant"']);
-  assert.equal(await read()({ provider: 'claude', sessionId: 'session-1' }), undefined, 'Malformed latest bytes must not reuse older fields as current');
+  assert.deepEqual(await read()({ provider: 'claude', sessionId: 'session-1' }), { model: 'claude-opus-5-5', effort: 'high' }, 'A partial line is skipped while complete authoritative fields in the bounded tail remain readable');
   await rm(f.paths.claude); await mkdir(f.paths.claude);
   assert.equal(await read()({ provider: 'claude', sessionId: 'session-1' }), undefined);
 });

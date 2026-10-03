@@ -92,18 +92,19 @@ async function layoutCase({ columns, rows, color }) {
     assert(lines.length <= height); assert(lines.every(line => displayWidth(line) <= width));
     return { ansi, text, lines };
   };
+  const leftPanel = line => line.includes('││') ? line.slice(0, line.indexOf('││') + 1) : line;
   for (const boardView of ['tasks', 'agents']) {
     f.patch({ boardView });
     const flat = boardView === 'tasks' ? boardRows(f.model.getSnapshot()) : listRows(f.model.getSnapshot());
     for (const [id, modelText, effort] of [['terminal-1', 'opus 5.5', 'high'], ['terminal-2', 'gpt-6.1-sol', 'xhigh']]) {
       const index = flat.findIndex(item => (item.type === 'task' ? item.row.agent : item.type === 'agent' ? item.agent : null)?.id === id);
-      const screen = draw(index), listWidth = columns === 120 ? Math.floor(width * .52) : width;
-      const rowIndex = screen.lines.findIndex(line => line.slice(0, listWidth).includes(id === 'terminal-1' ? 'review' : 'tests') && /Working|Done/.test(line.slice(0, listWidth)));
-      const row = screen.lines[rowIndex]?.slice(0, listWidth);
+      const screen = draw(index);
+      const rowIndex = screen.lines.findIndex(line => leftPanel(line).includes(id === 'terminal-1' ? 'review' : 'tests') && /Working|Done/.test(leftPanel(line)));
+      const row = screen.lines[rowIndex] && leftPanel(screen.lines[rowIndex]);
       assert(row, `${boardView} ${id}`);
       if (columns === 120) { assert(row.includes(modelText), row); assert(row.includes(effort), row); }
       else { assert(!row.includes(modelText), row); assert(!row.includes(effort), row); }
-      if (color && columns === 120) assert.match(screen.ansi.split('\n')[rowIndex], /\x1b\[38;2;130;152;137m[^\n]* · /);
+      if (color && columns === 120) assert.match(screen.ansi.split('\n')[rowIndex], /\x1b\[38;2;130;152;137m(?:opus 5\.5|gpt-6\.1-sol)/);
     }
   }
   for (const boardView of ['tasks', 'agents']) {
@@ -114,13 +115,14 @@ async function layoutCase({ columns, rows, color }) {
   const original = f.model.getSnapshot();
   f.patch({ view: 'board', boardView: 'tasks', tasks: original.tasks.map(task => ({ ...task,
     name: 'Implement useful deployment diagnostics', placement: { ...task.placement, cwd: '/fixture/shep/deployment' } })) });
-  const withFields = draw().lines.map(line => line.slice(0, columns === 120 ? Math.floor(width * .52) : width)).find(line => /Impl.*Working/.test(line));
+  const withFields = draw().lines.map(leftPanel).find(line => /Impl.*Working/.test(line));
   f.patch({ modelInfoByAgent: {} });
-  const withoutFields = draw().lines.map(line => line.slice(0, columns === 120 ? Math.floor(width * .52) : width)).find(line => /Impl.*Working/.test(line));
+  const withoutFields = draw().lines.map(leftPanel).find(line => /Impl.*Working/.test(line));
   assert(withFields); assert(withoutFields);
-  assert.equal(withFields, withoutFields, 'Optional model fields must preserve the existing name, folder, status and provider budget');
-  assert.doesNotMatch(withFields, /opus 5\.5|high/);
-  if (columns === 120) { assert.match(withFields, /Implement useful/); assert.match(withFields, /deployment/); }
+  assert.equal(withFields.match(/(Impl.*?)\s+Working/)[1].trim(), withoutFields.match(/(Impl.*?)\s+Working/)[1].trim(),
+    'Aligned optional columns must preserve the useful name text');
+  if (columns === 120) { assert.match(withFields, /Implement useful/); assert.match(withFields, /deployment/); assert.match(withFields, /opus 5\.5.*high/); }
+  else assert.doesNotMatch(withFields, /opus 5\.5|high/);
   f.patch({ tasks: original.tasks });
   f.patch({ view: 'board', boardView: 'tasks', modelInfoByAgent: {} });
   const blank = draw().text; assert.doesNotMatch(blank, /opus 5\.5|high|unknown/i);

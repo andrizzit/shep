@@ -1,6 +1,6 @@
 {
   "name": "shep-herdr-plugin",
-  "version": "0.4.0-checkpoint.8",
+  "version": "0.4.0-checkpoint.8.1",
   "private": true,
   "license": "MIT",
   "description": "Dispatch and manage your Herdr agents from an Ink terminal interface.",
