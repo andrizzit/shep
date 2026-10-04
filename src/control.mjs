@@ -82,6 +82,9 @@ function parseDockMarker(label) {
     if (value?.version !== 1 || !['ownTerminalId', 'agentTerminalId', 'provider', 'originTabId', 'originWorkspaceId'].every(key => present(value[key]))
       || (value.shellPid !== undefined && (!Number.isSafeInteger(value.shellPid) || value.shellPid <= 0))
       || ['shellName', 'shellArgv0', 'shellCommand'].some(key => value[key] !== undefined && !present(value[key]))
+      || (value.originTabLabel !== undefined && value.originTabLabel !== null && !present(value.originTabLabel))
+      || (value.dockedTabLabel !== undefined && value.dockedTabLabel !== null && !present(value.dockedTabLabel))
+      || (value.previousDockedTabLabel !== undefined && value.previousDockedTabLabel !== null && !present(value.previousDockedTabLabel))
       || !(value.agentName === null || present(value.agentName)) || !(value.sessionId === null || present(value.sessionId))) return null;
     return value;
   } catch { return null; }
@@ -155,6 +158,9 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   const jobKey = request => JSON.stringify([request.taskId, request.attemptId]);
   const hasMutation = argv => ['create', 'split', 'start', 'prompt', 'focus', 'close', 'remove', 'rename', 'move', 'swap'].includes(argv[1]);
   let dockState = null, dockBusy = false, dockMarkersChecked = false;
+  const uncertainDockNotified = new Set();
+  const tabRenameAttempted = new Set();
+  const tabRestoreAttempted = new Set();
 
 
   function assertContext() {
@@ -414,7 +420,10 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   }
 
   const dockFailure = (error, details = {}) => outcome('failed', messageFor(errorCode(error)), { code: errorCode(error), ...details });
-  const uncertainDock = (message, error, details = {}) => outcome('uncertain', message, { code: errorCode(error), ...details });
+  const uncertainDock = async (message, error, details = {}, states = []) => {
+    await warnUncertainDock(states);
+    return outcome('uncertain', message, { code: errorCode(error), ...details });
+  };
   const copyDockState = () => dockState ? structuredClone({ target: dockState.target, origin: dockState.origin,
     placeholder: dockState.placeholder, phase: dockState.phase }) : null;
 
@@ -447,6 +456,101 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     const pane = (await invoke(['pane', 'get', paneId])).result?.pane;
     if (!pane || pane.pane_id !== paneId) fail('invalid_response');
     return pane;
+  }
+
+  async function tabGet(tabId) {
+    const tab = (await invoke(['tab', 'get', tabId])).result?.tab;
+    if (!tab || tab.tab_id !== tabId) fail('invalid_response');
+    return tab;
+  }
+
+  async function originTabLabel(source, target, agent, switchFrom) {
+    try {
+      const tab = await tabGet(source.tab_id);
+      if (tab.workspace_id !== source.workspace_id || !present(tab.label) || tab.label.length > 512) return null;
+      const name = safeText(target.agentName || agent.name || KINDS.get(target.provider)?.name || target.provider);
+      if (!present(name) || name.length > 128) return null;
+      const docked = `${name} · in Shep`;
+      const previous = switchFrom?.tabLabel;
+      const inherited = previous?.tabId === source.tab_id && previous.workspaceId === source.workspace_id
+        && tab.label === previous.docked;
+      const original = inherited ? previous.original : tab.label;
+      return { tabId: source.tab_id, workspaceId: source.workspace_id, original, docked,
+        previousDocked: inherited ? previous.docked : null };
+    } catch { return null; }
+  }
+
+  async function renameOriginTab(state) {
+    const label = state?.tabLabel;
+    if (!label) return 'unavailable';
+    try {
+      const tab = await tabGet(label.tabId);
+      if (tab.workspace_id !== label.workspaceId || ![label.original, label.docked,
+        ...(present(label.previousDocked) ? [label.previousDocked] : [])].includes(tab.label)) return 'changed';
+      if (tab.label === label.docked) return 'renamed';
+      if (tabRenameAttempted.has(state.marker)) return 'failed';
+      tabRenameAttempted.add(state.marker);
+      try { await invoke(['tab', 'rename', label.tabId, label.docked], { allowDisconnected: true }); }
+      catch { /* A transport error may still mean the rename applied. Read once. */ }
+      try {
+        const after = await tabGet(label.tabId);
+        return after.workspace_id === label.workspaceId && after.label === label.docked ? 'renamed' : 'failed';
+      } catch { return 'failed'; }
+    } catch { return 'failed'; }
+  }
+
+  async function restoreOriginTab(state) {
+    const label = state?.tabLabel;
+    if (!label || label.original === label.docked && !present(label.previousDocked)) return 'unchanged';
+    try {
+      const tab = await tabGet(label.tabId);
+      if (tab.workspace_id !== label.workspaceId) return 'changed';
+      if (tab.label === label.original) return 'unchanged';
+      if (![label.docked, ...(present(label.previousDocked) ? [label.previousDocked] : [])].includes(tab.label)) return 'changed';
+      if (tabRestoreAttempted.has(state.marker)) return 'failed';
+      tabRestoreAttempted.add(state.marker);
+      try { await invoke(['tab', 'rename', label.tabId, label.original], { allowDisconnected: true }); }
+      catch { /* A transport error may still mean the rename applied. Read once. */ }
+      try {
+        const after = await tabGet(label.tabId);
+        return after.workspace_id === label.workspaceId && after.label === label.original ? 'restored' : 'failed';
+      } catch { return 'failed'; }
+    } catch (error) { return errorCode(error) === 'tab_not_found' ? 'missing' : 'failed'; }
+  }
+
+  const restoredTabMessage = (message, status) => status === 'failed'
+    ? `${message} Warning: origin tab label could not be restored.` : message;
+  function clearDockLatches(state) {
+    uncertainDockNotified.delete(state.target.terminalId);
+    tabRenameAttempted.delete(state.marker);
+    tabRestoreAttempted.delete(state.marker);
+  }
+
+  async function warnUncertainDock(states) {
+    if (!states?.length) return;
+    try {
+      const { snapshot, own } = await fresh();
+      for (const state of states) {
+        const target = state?.target;
+        if (!target?.terminalId) continue;
+        const pane = snapshot.panes.find(item => item.terminal_id === target.terminalId
+          && item.tab_id === own.tab_id && item.workspace_id === own.workspace_id && item.pane_id !== own.pane_id);
+        if (!pane) continue;
+        const currentTarget = { ...target, paneId: pane.pane_id };
+        let agent;
+        try {
+          agent = snapshot.agents.find(item => item.pane_id === pane.pane_id);
+          compareAgent(currentTarget, agent, false, true);
+          compareAgent(currentTarget, (await invoke(['agent', 'get', pane.pane_id])).result?.agent, false, true);
+        } catch { continue; }
+        await renameOriginTab(state);
+        if (uncertainDockNotified.has(target.terminalId)) continue;
+        uncertainDockNotified.add(target.terminalId);
+        const name = safeText(target.agentName || agent.name || KINDS.get(target.provider)?.name || target.provider || 'Agent');
+        try { await invoke(['notification', 'show', `${name} is still docked in Shep's tab — don't close it`, '--sound', 'none']); }
+        catch { /* The warning is best effort and must not retry a possibly delivered notification. */ }
+      }
+    } catch { /* The existing TUI and stderr uncertainty notices remain available. */ }
   }
 
   async function placeholderProcess(paneId) {
@@ -587,6 +691,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     const captured = { ...target, agentName: Object.hasOwn(target, 'agentName') ? target.agentName : target.name ?? null };
     const before = await checkedAgent(captured, false, true);
     if (before.snapshot.panes.find(pane => pane.pane_id === source.pane_id)?.terminal_id !== source.terminal_id) fail('changed_target');
+    const tabLabel = await originTabLabel(source, captured, agent, switchFrom);
     let placeholder, placeholderShell, newState, shellReady = false, moveAttempted = false, moveVerified = false;
     try {
       const result = (await invoke(['pane', 'split', '--pane', source.pane_id, '--direction', 'right', '--ratio', '0.5',
@@ -608,12 +713,15 @@ export function createController({ context, monitor, mode = 'live', delivery = '
         || present(exactPlaceholder.agent) || exactPlaceholder.launch_pending === true) fail('dock_missing');
       const marker = dockLabel({ ownTerminalId: own.terminal_id, agentTerminalId: target.terminalId,
         provider: target.provider, agentName: captured.agentName, sessionId: trustedSession(target.provider, target.sessionId) ?? null,
-        originTabId: source.tab_id, originWorkspaceId: source.workspace_id, ...placeholderShell });
+        originTabId: source.tab_id, originWorkspaceId: source.workspace_id,
+        originTabLabel: tabLabel?.original ?? null, dockedTabLabel: tabLabel?.docked ?? null,
+        previousDockedTabLabel: tabLabel?.previousDocked ?? null, ...placeholderShell });
       await invoke(['pane', 'rename', placeholder.pane_id, marker]);
       const marked = await paneGet(placeholder.pane_id);
       if (marked.terminal_id !== placeholder.terminal_id || marked.label !== marker) fail('invalid_response');
       newState = { target: captured, origin: { tabId: source.tab_id, workspaceId: source.workspace_id },
-        placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id, ...placeholderShell }, marker, phase: 'preparing' };
+        placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id, ...placeholderShell },
+        tabLabel, marker, phase: 'preparing' };
       if (!switchFrom) dockState = newState;
       await checkedAgent(captured, false, true);
       if (switchFrom) await movedAgent(switchFrom.target, switchFrom.target.terminalId, own.workspace_id, own.tab_id);
@@ -633,11 +741,20 @@ export function createController({ context, monitor, mode = 'live', delivery = '
         const restored = await undockCore(reserve);
         if (!restored.ok) fail('dock_missing');
         dockState = newState;
-        return outcome('docked', restored.message.includes('placeholder kept') ? restored.message : 'Selected agent docked beside Shep.',
+        const labelResult = await renameOriginTab(newState);
+        const message = labelResult === 'renamed'
+          ? restored.message.includes('placeholder kept') ? restored.message : 'Selected agent docked beside Shep.'
+          : restored.message.includes('placeholder kept')
+            ? `${restored.message} Warning: origin tab label did not change; keep Shep's tab open.`
+            : "Docked. Warning: origin tab label did not change; keep Shep's tab open.";
+        return outcome('docked', message,
           { target: structuredClone(verified.target), restoredTarget: restored.target });
       }
       dockState = newState;
-      return outcome('docked', 'Selected agent docked beside Shep.', { target: structuredClone(verified.target) });
+      const labelResult = await renameOriginTab(newState);
+      return outcome('docked', labelResult === 'renamed' ? 'Selected agent docked beside Shep.'
+        : "Docked. Warning: origin tab label did not change; keep Shep's tab open.",
+      { target: structuredClone(verified.target) });
     } catch (error) {
       dockMarkersChecked = false;
       if (switchFrom && moveVerified) {
@@ -668,7 +785,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
         } catch { /* An uncertain created pane is left for inspection. */ }
       }
       return uncertainDock('Dock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
-        { target: dockState?.target ?? captured });
+        { target: dockState?.target ?? captured }, [newState, dockState]);
     }
   }
 
@@ -690,7 +807,8 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   async function undockCore(reserve) {
     if (!dockState) return outcome('undocked', 'No agent is docked.');
     const state = dockState;
-    if (state.phase === 'uncertain') return outcome('uncertain', 'Dock movement was uncertain. Inspect Herdr before restoring it.', { code: 'dock_missing', target: structuredClone(state.target) });
+    if (state.phase === 'uncertain') return uncertainDock('Dock movement was uncertain. Inspect Herdr before restoring it.',
+      new ControlError('dock_missing'), { target: structuredClone(state.target) }, [state]);
     const { snapshot, own } = await fresh();
     reserve(own.workspace_id, state.origin.workspaceId);
     const candidate = snapshot.panes.filter(pane => pane.terminal_id === state.target.terminalId);
@@ -702,9 +820,11 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     if (!candidate.length) {
       if (!placeholder) fail('dock_missing');
       const closed = await closeDockPlaceholder(state);
+      const tabStatus = await restoreOriginTab(state);
+      clearDockLatches(state);
       dockState = null;
       dockMarkersChecked = true;
-      return outcome('undocked', closed ? 'The closed agent dock was cleared.' : 'Placeholder kept (busy or unverified); marker removed.');
+      return outcome('undocked', restoredTabMessage(closed ? 'The closed agent dock was cleared.' : 'Placeholder kept (busy or unverified); marker removed.', tabStatus));
     }
     const current = candidate[0];
     const verified = await movedAgent(state.target, state.target.terminalId, current.workspace_id, current.tab_id);
@@ -713,15 +833,19 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     if (state.phase === 'preparing' && current.tab_id === state.origin.tabId) {
       if (!placeholder) fail('dock_missing');
       const closed = await closeDockPlaceholder(state);
+      const tabStatus = await restoreOriginTab(state);
+      clearDockLatches(state);
       dockState = null;
       dockMarkersChecked = true;
-      return outcome('undocked', closed ? 'Unfinished dock cleared.' : 'Agent home; placeholder kept (busy or unverified).', { target: verified.target });
+      return outcome('undocked', restoredTabMessage(closed ? 'Unfinished dock cleared.' : 'Agent home; placeholder kept (busy or unverified).', tabStatus), { target: verified.target });
     }
     if (state.phase === 'restoring') {
       const closed = placeholder ? await closeDockPlaceholder(state) : true;
+      const tabStatus = await restoreOriginTab(state);
+      clearDockLatches(state);
       dockState = null;
       dockMarkersChecked = true;
-      return outcome('undocked', closed ? 'Agent returned to its original workspace.' : 'Agent restored; placeholder kept (busy or unverified).', { target: verified.target });
+      return outcome('undocked', restoredTabMessage(closed ? 'Agent returned to its original workspace.' : 'Agent restored; placeholder kept (busy or unverified).', tabStatus), { target: verified.target });
     }
     const originWorkspace = snapshot.workspaces.some(workspace => workspace.workspace_id === state.origin.workspaceId);
     const originTab = originWorkspace && placeholder && snapshot.tabs?.some(tab => tab.tab_id === state.origin.tabId && tab.workspace_id === state.origin.workspaceId);
@@ -739,16 +863,19 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     state.origin = { tabId: restored.pane.tab_id, workspaceId: restored.pane.workspace_id };
     state.phase = 'restoring';
     const closed = placeholder ? await closeDockPlaceholder(state) : true;
+    const tabStatus = await restoreOriginTab(state);
+    clearDockLatches(state);
     dockState = null;
     dockMarkersChecked = true;
-    return outcome('undocked', closed ? 'Agent returned to its original tab.' : 'Agent restored; placeholder kept (busy or unverified).', { target: restored.target });
+    return outcome('undocked', restoredTabMessage(closed ? 'Agent returned to its original tab.' : 'Agent restored; placeholder kept (busy or unverified).', tabStatus), { target: restored.target });
   }
 
   async function dock({ target } = {}) {
     return dockOperation(async reserve => {
       let restoredTarget;
       if (dockState) {
-        if (dockState.phase === 'uncertain') return outcome('uncertain', 'Dock movement was uncertain. Inspect Herdr before docking again.', { code: 'dock_missing' });
+        if (dockState.phase === 'uncertain') return uncertainDock('Dock movement was uncertain. Inspect Herdr before docking again.',
+          new ControlError('dock_missing'), { target: structuredClone(dockState.target) }, [dockState]);
         if (dockState.phase === 'docked' && target?.terminalId === dockState.target.terminalId
           && target?.provider === dockState.target.provider && (target?.agentName ?? target?.name ?? null) === dockState.target.agentName) {
           await movedAgent(dockState.target, dockState.target.terminalId, pinned.context.workspaceId, pinned.context.tabId);
@@ -771,7 +898,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
     return dockOperation(async reserve => {
       try { return await undockCore(reserve); }
       catch (error) { dockMarkersChecked = false; return uncertainDock('Undock could not be confirmed. Inspect Herdr; Shep will not retry it automatically.', error,
-        { ...(dockState?.target ? { target: structuredClone(dockState.target) } : {}) }); }
+        { ...(dockState?.target ? { target: structuredClone(dockState.target) } : {}) }, [dockState]); }
     }, { requireLive: false });
   }
 
@@ -795,27 +922,37 @@ export function createController({ context, monitor, mode = 'live', delivery = '
         dockState = { target, origin: { tabId: marker.originTabId, workspaceId: marker.originWorkspaceId },
           placeholder: { paneId: placeholder.pane_id, terminalId: placeholder.terminal_id,
             shellPid: marker.shellPid, shellName: marker.shellName, shellArgv0: marker.shellArgv0, shellCommand: marker.shellCommand },
+          tabLabel: present(marker.originTabLabel) && present(marker.dockedTabLabel)
+            ? { tabId: marker.originTabId, workspaceId: marker.originWorkspaceId,
+              original: marker.originTabLabel, docked: marker.dockedTabLabel,
+              previousDocked: present(marker.previousDockedTabLabel) ? marker.previousDockedTabLabel : null } : null,
           marker: placeholder.label, phase: 'docked' };
         if (!agentPane.length) {
           const closed = await closeDockPlaceholder(dockState);
+          const tabStatus = await restoreOriginTab(dockState);
+          clearDockLatches(dockState);
           dockState = null;
           dockMarkersChecked = true;
-          return outcome('recovered', closed ? 'Cleared a leftover dock for a closed agent.' : 'Placeholder kept (busy or unverified); marker removed.');
+          return outcome('recovered', restoredTabMessage(closed ? 'Cleared a leftover dock for a closed agent.' : 'Placeholder kept (busy or unverified); marker removed.', tabStatus));
         }
         if (agentPane[0].workspace_id === marker.originWorkspaceId && agentPane[0].tab_id === marker.originTabId) {
           await movedAgent(target, target.terminalId, marker.originWorkspaceId, marker.originTabId);
           const closed = await closeDockPlaceholder(dockState);
+          const tabStatus = await restoreOriginTab(dockState);
+          clearDockLatches(dockState);
           dockState = null;
           dockMarkersChecked = true;
-          return outcome('recovered', closed ? 'Cleared a leftover dock after the agent returned.' : 'Agent restored; placeholder kept (busy or unverified).', { target });
+          return outcome('recovered', restoredTabMessage(closed ? 'Cleared a leftover dock after the agent returned.' : 'Agent restored; placeholder kept (busy or unverified).', tabStatus), { target });
         }
         if (agentPane[0].tab_id !== own.tab_id || agentPane[0].workspace_id !== own.workspace_id) fail('dock_missing');
         await movedAgent(target, target.terminalId, own.workspace_id, own.tab_id);
         const result = await undockCore(reserve);
-        return result.ok ? outcome('recovered', result.message.includes('placeholder kept') ? result.message : 'Recovered the agent from the previous dock.', { target: result.target }) : result;
+        return result.ok ? outcome('recovered', /placeholder kept|Warning:/.test(result.message)
+          ? result.message : 'Recovered the agent from the previous dock.', { target: result.target }) : result;
       } catch (error) {
         dockMarkersChecked = false;
-        return uncertainDock('Leftover dock could not be restored safely. Inspect Herdr.', error);
+        return uncertainDock('Leftover dock could not be restored safely. Inspect Herdr.', error,
+          { target: dockState?.target }, [dockState]);
       }
     }, { requireLive: false });
   }
