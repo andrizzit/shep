@@ -119,6 +119,7 @@ function fixture({ width = 328, agents = ['alpha', 'beta'] } = {}) {
 }
 
 const callsFor = (f, kind, action) => f.calls.filter(argv => argv[0] === kind && argv[1] === action);
+const markerValue = f => JSON.parse(Buffer.from(f.placeholder().label.slice('shep-dock:v1:'.length), 'base64url').toString('utf8'));
 
 test('origin tab shows agent name while docked and restores its exact label on undock', async t => {
   const f = fixture({ agents: ['alpha'] }); const controller = f.createController(); t.after(controller.dispose);
@@ -127,6 +128,50 @@ test('origin tab shows agent name while docked and restores its exact label on u
   assert.equal((await controller.undock()).state, 'undocked');
   assert.equal(f.tabLabel(), 'Agents');
   assert.deepEqual(callsFor(f, 'tab', 'rename').map(argv => argv[3]), ['alpha · in Shep', 'Agents']);
+});
+
+test('new dock markers cap tab-label metadata without truncating an origin title', async t => {
+  const f = fixture({ agents: ['alpha'] }); const controller = f.createController(); t.after(controller.dispose);
+  const exactLimit = 'x'.repeat(128);
+  f.snapshot.tabs.find(tab => tab.tab_id === 'w2:t1').label = exactLimit;
+  assert.equal((await controller.dock({ target: f.target('alpha') })).state, 'docked');
+  assert.equal(markerValue(f).originTabLabel, exactLimit);
+  assert.equal(f.tabLabel(), 'alpha · in Shep');
+  assert.equal((await controller.undock()).state, 'undocked');
+  assert.equal(f.tabLabel(), exactLimit);
+
+  const overLimit = 'é'.repeat(65); // 65 characters, 130 UTF-8 bytes.
+  f.snapshot.tabs.find(tab => tab.tab_id === 'w2:t1').label = overLimit;
+  const renameCount = callsFor(f, 'tab', 'rename').length;
+  const docked = await controller.dock({ target: f.target('alpha') });
+  assert.equal(docked.state, 'docked');
+  assert.match(docked.message, /Warning: origin tab label did not change/);
+  assert.equal(markerValue(f).originTabLabel, null);
+  assert.equal(markerValue(f).dockedTabLabel, null);
+  assert.equal(callsFor(f, 'tab', 'rename').length, renameCount);
+  assert.equal((await controller.undock()).state, 'undocked');
+  assert.equal(f.tabLabel(), overLimit);
+
+  const longName = 'a'.repeat(120);
+  const named = fixture({ agents: [longName] }); const namedController = named.createController(); t.after(namedController.dispose);
+  const longNameDock = await namedController.dock({ target: named.target(longName) });
+  assert.equal(longNameDock.state, 'docked');
+  assert.match(longNameDock.message, /Warning: origin tab label did not change/);
+  assert.equal(markerValue(named).dockedTabLabel, null);
+  assert.equal(named.tabLabel(), 'Agents');
+  assert.equal((await namedController.undock()).state, 'undocked');
+});
+
+test('recovery accepts a checkpoint 9.3 marker with a longer captured label', async t => {
+  const f = fixture({ agents: ['alpha'] }); const first = f.createController(); t.after(first.dispose);
+  assert.equal((await first.dock({ target: f.target('alpha') })).state, 'docked');
+  const oldLabel = 'x'.repeat(129);
+  const marker = markerValue(f);
+  marker.originTabLabel = oldLabel;
+  f.placeholder().label = 'shep-dock:v1:' + Buffer.from(JSON.stringify(marker)).toString('base64url');
+  const restarted = f.createController(); t.after(restarted.dispose);
+  assert.equal((await restarted.recoverDock()).state, 'recovered');
+  assert.equal(f.tabLabel(), oldLabel);
 });
 
 test('busy placeholder remains open while the original tab label returns', async t => {
@@ -272,8 +317,8 @@ test('uncertain moved dock sends one exact warning and keeps origin label across
   const result = await controller.dock({ target: f.target('alpha') });
   assert.equal(result.state, 'uncertain');
   assert.equal(f.tabLabel(), 'alpha · in Shep');
-  assert.deepEqual(callsFor(f, 'notification', 'show').map(argv => argv[2]),
-    ["alpha is still docked in Shep's tab — don't close it"]);
+  assert.deepEqual(callsFor(f, 'notification', 'show'),
+    [['notification', 'show', "alpha is still docked in Shep's tab — don't close it", '--sound', 'request']]);
   await controller.undock();
   await controller.dock({ target: f.target('alpha') });
   assert.equal(callsFor(f, 'notification', 'show').length, 1);
@@ -285,8 +330,9 @@ test('wide switch uncertainty warns once for each exact agent still in Shep', as
   assert.equal((await controller.dock({ target: f.target('alpha') })).state, 'docked');
   f.failMove('after');
   assert.equal((await controller.dock({ target: f.target('beta') })).state, 'uncertain');
-  assert.deepEqual(callsFor(f, 'notification', 'show').map(argv => argv[2]),
-    ["beta is still docked in Shep's tab — don't close it", "alpha is still docked in Shep's tab — don't close it"]);
+  assert.deepEqual(callsFor(f, 'notification', 'show'),
+    [['notification', 'show', "beta is still docked in Shep's tab — don't close it", '--sound', 'request'],
+      ['notification', 'show', "alpha is still docked in Shep's tab — don't close it", '--sound', 'request']]);
   await controller.undock();
   assert.equal(callsFor(f, 'notification', 'show').length, 2);
 });

@@ -28,6 +28,7 @@ const KINDS = new Map(PROVIDERS.map(([id, name, executable]) => [id, { name, exe
 const UNCERTAIN = new Set(['timeout', 'unavailable', 'invalid_response', 'too_large', 'disposed', 'agent_start_transport_failed']);
 const NEEDS_INPUT = new Set(['agent_not_ready', 'agent_blocked']);
 const DOCK_MARKER = 'shep-dock:v1:';
+const DOCK_TAB_LABEL_MAX_BYTES = 128;
 const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'pwsh', 'nu', 'elvish', 'xonsh']);
 const MESSAGES = Object.assign(Object.create(null), {
   outside_herdr: 'Agent controls require the current Herdr pane. Reopen Shep inside Herdr.',
@@ -467,14 +468,17 @@ export function createController({ context, monitor, mode = 'live', delivery = '
   async function originTabLabel(source, target, agent, switchFrom) {
     try {
       const tab = await tabGet(source.tab_id);
-      if (tab.workspace_id !== source.workspace_id || !present(tab.label) || tab.label.length > 512) return null;
+      if (tab.workspace_id !== source.workspace_id || !present(tab.label)
+        || Buffer.byteLength(tab.label, 'utf8') > DOCK_TAB_LABEL_MAX_BYTES) return null;
       const name = safeText(target.agentName || agent.name || KINDS.get(target.provider)?.name || target.provider);
-      if (!present(name) || name.length > 128) return null;
+      if (!present(name)) return null;
       const docked = `${name} · in Shep`;
+      if (Buffer.byteLength(docked, 'utf8') > DOCK_TAB_LABEL_MAX_BYTES) return null;
       const previous = switchFrom?.tabLabel;
       const inherited = previous?.tabId === source.tab_id && previous.workspaceId === source.workspace_id
         && tab.label === previous.docked;
       const original = inherited ? previous.original : tab.label;
+      if (Buffer.byteLength(original, 'utf8') > DOCK_TAB_LABEL_MAX_BYTES) return null;
       return { tabId: source.tab_id, workspaceId: source.workspace_id, original, docked,
         previousDocked: inherited ? previous.docked : null };
     } catch { return null; }
@@ -547,7 +551,7 @@ export function createController({ context, monitor, mode = 'live', delivery = '
         if (uncertainDockNotified.has(target.terminalId)) continue;
         uncertainDockNotified.add(target.terminalId);
         const name = safeText(target.agentName || agent.name || KINDS.get(target.provider)?.name || target.provider || 'Agent');
-        try { await invoke(['notification', 'show', `${name} is still docked in Shep's tab — don't close it`, '--sound', 'none']); }
+        try { await invoke(['notification', 'show', `${name} is still docked in Shep's tab — don't close it`, '--sound', 'request']); }
         catch { /* The warning is best effort and must not retry a possibly delivered notification. */ }
       }
     } catch { /* The existing TUI and stderr uncertainty notices remain available. */ }
