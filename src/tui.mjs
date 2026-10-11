@@ -5,13 +5,14 @@ import { createTuiModel, visibleAgents, knownStatus, agentPresentation, STATUS_L
 import { taskGroups, taskRows, TASK_LABELS, taskPresentation, matchesTask, displayArgs, summaryLabel } from './tui-tasks.mjs';
 import { safeText, displayWidth } from './terminal.mjs';
 import { createModelReader } from './model-info.mjs';
+import { createCodexModelReader } from './codex-model-info.mjs';
+import { createAgeReader } from './age-info.mjs';
 
 export const TUI_COLORS = Object.freeze({ canvas: '#111b19', panel: '#172420', selected: '#293f34', border: '#465c4e', ink: '#eef2e8', muted: '#acb9ac', faint: '#829889', orange: '#f09365', working: '#e5c86e', blocked: '#f18b89', done: '#7fd3c7', idle: '#93cd95', unknown: '#a2aaa5' });
 const C = TUI_COLORS;
 const dots = { working: '●', blocked: '●', done: '●', idle: '○', unknown: '·' };
 const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';
 const MOUSE_OFF = '\x1b[?1000l\x1b[?1006l';
-const DOCK_TAB_WARNING = 'Quit Shep with q before closing this tab — closing the tab also closes the docked agent.';
 const sprite = ['DD.....DD', 'DDDDWDDDD', 'DD.DWD.DD', 'DD.WWW.DD', '.DWW.WWD.', '.DDWWWDD.', '.DD...DD.', '.WW...WW.'];
 
 function truncate(value, width) {
@@ -54,14 +55,15 @@ function health(state) {
   if (state.snapshot.source.state === 'connected') return { label: 'LIVE', color: C.idle };
   return { label: state.snapshot.updatedAt ? 'STALE · actions disabled' : 'CONNECTING', color: C.blocked };
 }
-const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000 ? '<1m' : milliseconds < 3600000 ? `${Math.floor(milliseconds / 60000)}m` : `${Math.floor(milliseconds / 3600000)}h`;
+const elapsed = milliseconds => milliseconds == null ? '' : milliseconds < 60000 ? '<1m' : milliseconds < 3600000 ? `${Math.floor(milliseconds / 60000)}m`
+  : milliseconds < 86400000 ? `${Math.floor(milliseconds / 3600000)}h` : `${Math.floor(milliseconds / 86400000)}d`;
 const taskColor = status => TASK_LABELS[status] === 'Needs you' || status === 'failed' ? C.blocked : status === 'working' ? C.working : C.muted;
 const attention = row => TASK_LABELS[taskPresentation(row)] === 'Needs you';
 function agentRow(state, agent) {
   const task = state.tasks.find(item => !item.dismissed && matchesTask(item, agent));
   const path = agent.workspace?.path;
   const project = task?.project || state.projects.find(item => path === item.root || path?.startsWith(item.root + '/') || item.worktrees?.some(tree => path === tree.path || path?.startsWith(tree.path + '/')));
-  return { agent, task, project, status: agentPresentation(state, agent), elapsedMs: task ? Math.max(0, Date.now() - Date.parse(task.at)) : null };
+  return { agent, task, project, status: agentPresentation(state, agent) };
 }
 function rowName(row) {
   const agent = row.agent;
@@ -98,23 +100,39 @@ const modelDetails = (state, agent) => {
   const info = modelInfo(state, agent);
   return [...(info?.model ? [`Model: ${info.model}`] : []), ...(info?.effort ? [`Effort: ${info.effort}`] : [])];
 };
+const ageInfo = (state, agent) => agent && state.ageInfoByAgent?.[agent.id];
+const agentAge = (state, agent) => {
+  const info = ageInfo(state, agent);
+  return Number.isFinite(info?.startedAt) ? Math.max(0, Date.now() - info.startedAt) : null;
+};
+const ageDetails = (state, agent) => {
+  const milliseconds = agentAge(state, agent);
+  if (milliseconds === null) return [];
+  const minutes = Math.floor(milliseconds / 60000), hours = Math.floor(minutes / 60), days = Math.floor(hours / 24);
+  const duration = minutes === 0 ? '<1m' : [days ? `${days}d` : '', hours % 24 ? `${hours % 24}h` : '', minutes % 60 ? `${minutes % 60}m` : ''].filter(Boolean).join(' ');
+  const start = new Date(ageInfo(state, agent).startedAt);
+  const time = [start.getHours(), start.getMinutes()].map(value => String(value).padStart(2, '0')).join(':');
+  const date = [start.getFullYear(), String(start.getMonth() + 1).padStart(2, '0'), String(start.getDate()).padStart(2, '0')].join('-');
+  const since = days ? `${date} ${time}` : time;
+  return [`Running for ${duration} (since ${since})`];
+};
 function rowCells(state, row) {
   const { name, pane } = rowName(row), info = modelInfo(state, row.agent), status = taskPresentation(row);
   return { name: name + (pane ? ' ' + pane : ''), status: TASK_LABELS[status] === 'Needs you' ? '! Needs you' : TASK_LABELS[status] || 'Starting',
     provider: providerName(row.task?.agent.provider || row.agent?.provider), model: shortModel(info?.model) || '', effort: info?.effort || '',
-    folder: rowFolder(row) || elapsed(row.elapsedMs) };
+    age: elapsed(agentAge(state, row.agent)), folder: rowFolder(row) };
 }
 function rowColumns(state, rows, width, listWidth) {
   const values = rows.map(row => rowCells(state, row));
   const gap = listWidth >= 100 ? 3 : listWidth >= 70 ? 2 : 1;
   const widest = (field, cap) => Math.min(cap, Math.max(0, ...values.map(value => displayWidth(value[field]))));
   const columns = { name: widest('name', 24), status: widest('status', 11), provider: widest('provider', 12),
-    model: width < 50 ? 0 : widest('model', 24), effort: width < 50 ? 0 : widest('effort', 8), folder: widest('folder', 22) };
+    model: width < 50 ? 0 : widest('model', 24), effort: width < 50 ? 0 : widest('effort', 8), age: widest('age', 8), folder: widest('folder', 22) };
   const minimumName = Math.min(columns.name, 16);
   const used = name => 3 + name + Object.entries(columns).filter(([key]) => key !== 'name').reduce((sum, [, size]) => sum + (size ? size + gap : 0), 0);
   // Optional fields give way in this order; every visible row shares the same
   // widths, including its blank cells. Useful names and statuses lead the row.
-  for (const field of ['effort', 'model', 'folder']) if (used(columns.name) > width) columns[field] = 0;
+  for (const field of ['effort', 'model', 'age', 'folder']) if (used(columns.name) > width) columns[field] = 0;
   if (used(minimumName) > width) columns.provider = Math.max(0, columns.provider - (used(minimumName) - width));
   columns.name = Math.max(1, Math.min(columns.name, width - (used(0))));
   return { ...columns, gap };
@@ -128,7 +146,7 @@ function NamedRow({ state, row, active, width, columns }) {
     line(`${attention(row) ? '▌' : active ? '›' : status === 'working' ? '●' : '○'}${attention(row) && active ? '›' : ' '} `, { color: taskColor(status), bold: attention(row) }),
     h(Box, { width: columns.name, flexShrink: 0 }, h(Text, { wrap: 'truncate-end' }, h(Text, { color: C.ink, bold: true }, shownName),
       pane && paneWidth > 0 ? h(Text, { color: C.faint }, ' ' + truncate(pane, paneWidth)) : null)),
-    ...['status', 'provider', 'model', 'effort', 'folder'].filter(field => columns[field]).flatMap(field => [line(' '.repeat(columns.gap), { key: `${field}-gap` }),
+    ...['status', 'provider', 'model', 'effort', 'age', 'folder'].filter(field => columns[field]).flatMap(field => [line(' '.repeat(columns.gap), { key: `${field}-gap` }),
       h(Box, { key: field, width: columns[field], height: 1, flexShrink: 0 }, field === 'status' ? h(Badge, { status }) : line(truncate(cells[field], columns[field]), { color: C.faint }))]));
 }
 export function listRows(state) {
@@ -163,7 +181,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
       if (row.type === 'provider') return h(Box, { key: `p-${row.provider}`, height: 1, flexShrink: 0 }, line(`${providerName(row.provider)} (${row.count})`, { color: C.orange, bold: true }));
       if (row.type === 'empty') return h(Box, { key: `e-${row.provider}`, height: 1, flexShrink: 0 }, line('  No agents', { color: C.faint }));
       const active = selected?.id === row.agent.id;
-      return h(Click, { key: `${row.type}-${row.agent.id}`, registry, id: `${row.type}-${row.agent.id}`, action: () => model.action('select', row.agent.id), width: '100%', height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
+      return h(Click, { key: `${row.type}-${row.agent.id}`, registry, id: `${row.type}-${row.agent.id}`, action: () => model.action('click-agent', row.agent.id), width: '100%', height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
         row.type === 'agent' ? h(NamedRow, { state, row: row.row, active, width: width - 4, columns }) : line(`  ${rowSupplement(row.row)}`, { color: attention(row.row) ? C.blocked : C.faint }));
     }),
     h(Box, { flexGrow: 1 }),
@@ -171,7 +189,7 @@ function AgentList({ state, model, width, height, registry, offset, compactActio
       h(Button, { label: 'Focus ↵', registry, id: 'focus', disabled: Boolean(controlBlock(state)) || state.view === 'command', action: () => model.action('focus') }),
       h(Button, { label: 'Close x', registry, id: 'close', disabled: Boolean(controlBlock(state)) || state.view === 'command', action: () => model.action('close') }),
       line(`${offset + 1}/${rows.length}`, { color: C.faint })) :
-      line(rows.length > capacity ? `${offset + 1}–${Math.min(offset + capacity, rows.length)} of ${rows.length} rows · wheel / ↑↓` : 'Click to select · Enter to focus', { color: C.faint }));
+      line(rows.length > capacity ? `${offset + 1}–${Math.min(offset + capacity, rows.length)} of ${rows.length} rows · wheel / ↑↓` : 'Double click / Enter to focus · click / ↑↓ select', { color: C.faint }));
 }
 export function boardRows(state) {
   if (state.boardView !== 'tasks') return listRows(state);
@@ -187,7 +205,7 @@ function TaskList({ state, model, width, height, registry, offset = 0, compactAc
     ...shown.map(item => {
       if (item.type === 'project') return line(`${item.group.name} (${item.group.rows.length})`, { key: `group-${item.group.key}`, color: C.orange, bold: true });
       const row = item.row, active = row.id === state.selectedTaskId;
-      return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('select-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
+      return h(Click, { key: `${item.type}-${row.id}`, registry, id: `${item.type}-${row.id}`, action: () => model.action('click-task', row.id), height: 1, flexShrink: 0, backgroundColor: active ? C.selected : C.canvas },
         item.type === 'task' ? h(NamedRow, { state, row, active, width: width - 4, columns }) : line(`  ${rowSupplement(row)}`, { color: attention(row) ? C.blocked : C.faint }));
     }),
     !rows.length && line(state.projectsLoading ? 'Projects loading…' : state.query || state.filter !== 'all' ? 'No matching tasks.' : 'No tasks yet. /dispatch starts one.', { color: C.faint }),
@@ -195,7 +213,7 @@ function TaskList({ state, model, width, height, registry, offset = 0, compactAc
     compactActions ? h(Box, { gap: 0, flexShrink: 0 },
       h(Button, { label: 'Focus ↵', registry, id: 'focus', action: () => model.action('focus') }),
       h(Button, { label: 'Close x', registry, id: 'close', action: () => model.action('close') }),
-      h(Button, { label: 'Details →', registry, id: 'details', action: () => model.action('details') })) : line('g Agents · Click to select · Enter to focus', { color: C.faint }));
+      h(Button, { label: 'Details →', registry, id: 'details', action: () => model.action('details') })) : line('Double click / Enter to focus · click / ↑↓ select', { color: C.faint }));
 }
 function TaskDetail(props) {
   const row = taskRows(props.state).find(item => item.id === props.state.selectedTaskId);
@@ -211,7 +229,7 @@ function OwnedTaskDetail({ state, model, width, height, registry, row }) {
   const workspaceArg = worktree && (/^[\w:.-]+$/.test(worktree.workspaceId) ? worktree.workspaceId : `'${worktree.workspaceId.replaceAll("'", "'\\''")}'`);
   const content = [task.inputTask, summaryLabel(task.summary), ...(task.summary?.at ? [`Checked: ${task.summary.at}`] : []), ...(task.summary?.message ? [task.summary.message] : []),
     `Project: ${task.project.name}`, `Actual cwd: ${task.placement?.cwd || 'Not confirmed'}`, `Requested subfolder: ${task.subfolder || '(root)'}`,
-    `${providerName(task.agent.provider)} · ${elapsed(row.elapsedMs)}`, ...modelDetails(state, row.agent), `Project root: ${task.project.root}`,
+    providerName(task.agent.provider), ...modelDetails(state, row.agent), ...ageDetails(state, row.agent), `Project root: ${task.project.root}`,
     `Placement: ${task.placement ? task.placement.mode + ' · ' + task.placement.targetKind : 'Awaiting target'}`,
     `Why: ${task.placement?.reason || 'Resolved again before launch'}`,
     ...(worktree ? [`Branch: ${worktree.branch}`, `Worktree path: ${worktree.path}`, 'Manual removal in current Herdr instance:', `herdr worktree remove --workspace ${workspaceArg}`] : []),
@@ -248,7 +266,7 @@ function Detail({ state, model, width, height, registry }) {
   const disabled = Boolean(controlBlock(state)) || state.view === 'command';
   const renameDisabled = disabled || Boolean(state.busy) || agent?.launchPending === true;
   const { name, pane } = row ? rowName(row) : {};
-  const content = agent ? ['Task text unavailable for this agent.', ...(attention(row) ? [rowSupplement(row)] : []), providerName(agent.provider), ...modelDetails(state, agent),
+  const content = agent ? ['Task text unavailable for this agent.', ...(attention(row) ? [rowSupplement(row)] : []), providerName(agent.provider), ...modelDetails(state, agent), ...ageDetails(state, agent),
     agent.workspace?.path || 'Working directory unavailable', `Pane: ${agent.paneId}`, `Terminal: ${agent.terminalId || agent.id}`] : [];
   const lines = content.flatMap((text, index) => wrappedLines(text, Math.max(1, width - 4)).map(value => ({ value, color: index >= content.length - 2 ? C.faint : C.muted })));
   const capacity = Math.max(1, height - 5), offset = Math.min(state.detailOffset, Math.max(0, lines.length - capacity));
@@ -409,15 +427,6 @@ function wrappedLines(value, width) {
   }
   return lines;
 }
-function dockWarningLines(width) {
-  const lines = [''];
-  for (const word of DOCK_TAB_WARNING.split(' ')) {
-    const current = lines.at(-1);
-    if (current && displayWidth(`${current} ${word}`) > width) lines.push(word);
-    else lines[lines.length - 1] = current ? `${current} ${word}` : word;
-  }
-  return lines;
-}
 function Decision({ state, model, width, height, registry }) {
   const decision = state.decision;
   const content = decision.kind === 'trust'
@@ -507,27 +516,18 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
     line('▟▀ᴥ▀▙  shep.', { color: C.orange, bold: true }),
     line('Enlarge this pane to at least 40 × 15.', { color: C.muted }),
     line('q / Ctrl+C quit; your agents keep running.', { color: C.muted }));
-  const dockListOnly = Boolean(state.dockedTarget) && ['board', 'search'].includes(state.view);
-  const compact = height < 25 || dockListOnly && width < 88;
+  const compact = height < 25;
   const short = height < 17;
-  const warningLines = dockListOnly ? dockWarningLines(width) : [];
-  const selectedRow = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId) : null;
-  const selectedAgent = model.selected() ?? (selectedRow ? null : state.snapshot.agents.find(agent => agent.terminalId === state.dockedTarget?.terminalId));
-  const selectedInfo = selectedAgent && state.modelInfoByAgent?.[selectedAgent.id];
-  const selectedProvider = selectedRow?.task?.agent.provider || selectedAgent?.provider;
-  const dockHeader = selectedRow || selectedAgent ? [selectedRow?.task?.name || selectedAgent?.name || providerName(selectedProvider),
-    TASK_LABELS[selectedRow ? taskPresentation(selectedRow) : agentPresentation(state, selectedAgent)] || 'Starting',
-    providerName(selectedProvider), selectedInfo?.model || 'Model unknown', selectedInfo?.effort || 'Effort unknown'].join(' · ') : 'Dock · Select an agent';
   const status = health(state);
   const agents = state.snapshot.agents || [];
   const headerHeight = short ? 1 : compact ? 2 : 4;
-  const toolbarHeight = dockListOnly && short ? 1 : compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up', 'rename'].includes(state.view) ? 0 : 3;
-  const footerHeight = dockListOnly ? 2 + warningLines.length : short ? 1 : 2;
+  const toolbarHeight = compact && ['compose', 'confirm', 'decision', 'picker', 'folder', 'notice', 'follow-up', 'rename'].includes(state.view) ? 0 : 3;
+  const footerHeight = short ? 1 : 2;
   const notificationHeight = state.requiredNotice ? noticeLines(state, width).length : 2;
   const suggestionRows = state.view === 'command' && state.suggestions.length ? Math.max(1, Math.min(5, state.suggestions.length, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - 5)) : 0;
   const suggestionHeight = suggestionRows ? suggestionRows + 1 : 0;
-  const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight - (dockListOnly ? 1 : 0));
-  const split = !dockListOnly && width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
+  const bodyHeight = Math.max(2, height - headerHeight - toolbarHeight - footerHeight - notificationHeight - suggestionHeight);
+  const split = width >= 88 && bodyHeight >= 12 && (width >= 110 || !['compose', 'confirm', 'decision', 'picker', 'folder', 'notice'].includes(state.view));
   const listWidth = split ? Math.floor(width * (width >= 110 ? .7 : .52)) : width;
   const rightWidth = width - listWidth;
   const activePanel = state.view === 'rename' ? RenameEditor : state.view === 'follow-up' ? FollowUpEditor : state.view === 'compose' ? Composer : state.view === 'confirm' ? Confirmation : state.view === 'decision' ? Decision : state.view === 'notice' ? NoticeDetail : ['picker', 'folder'].includes(state.view) ? ProjectPicker : state.boardView === 'tasks' ? TaskDetail : Detail;
@@ -538,8 +538,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
   if (short) footer = state.view === 'command' ? '↵ send · Tab complete · Esc back' : state.view === 'compose' ? 'Tab fields · Ctrl+S send · Esc' : ['confirm', 'decision'].includes(state.view) ? 'Esc cancel · y confirm · ↑↓ more' : state.view === 'detail' ? '↑↓ scroll · ↵ focus · Esc back' : ['/ dispatch', '↑↓', '↵ focus', 'x close'].join(' · ');
   if (state.view === 'follow-up') footer = 'Ctrl+S send · Esc keeps draft';
   if (state.view === 'rename') footer = 'Enter rename · Esc cancel';
-  if (dockListOnly) footer = short ? 'Ctrl+B h Shep · t off' : 'Enter focus · t dock off · ↑↓ select · x close · q quit';
-  const boardActions = !dockListOnly && ['board', 'detail'].includes(state.view);
+  const boardActions = ['board', 'detail'].includes(state.view);
   const selectedTask = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
   const renameDisabled = !model.selected() || Boolean(state.busy || controlBlock(state)) || model.selected()?.launchPending === true || ['queued', 'starting'].includes(selectedTask?.launch.state);
   const clearable = selectedTask && (selectedTask.live.status === 'closed' || selectedTask.launch.state === 'failed');
@@ -569,18 +568,17 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         h(Button, { label: `g ${state.boardView === 'tasks' ? 'Agents' : 'Tasks'}`, registry, id: 'board-toggle', action: () => model.action('board-toggle') }),
         h(Button, { label: `f ${state.filter === 'all' ? 'All' : TASK_LABELS[state.filter]}`, registry, id: 'filter', disabled: state.view === 'command', action: () => model.action('filter') }),
         h(Click, { registry, id: 'search', action: () => model.action('search'), flexGrow: 1, minWidth: 0 }, line(`s ${state.query}${state.view === 'search' ? '▏' : state.query ? '' : 'Search'}`, { color: state.view === 'search' ? C.orange : C.muted }))),
-      !(dockListOnly && short) && line(`Default: ${defaults}`, { color: C.muted }),
-      !(dockListOnly && short) && h(Box, { height: 1, flexShrink: 0 },
+      line(`Default: ${defaults}`, { color: C.muted }),
+      h(Box, { height: 1, flexShrink: 0 },
         h(Click, { registry, id: 'command', action: () => model.action('command'), flexGrow: 1, minWidth: 0, backgroundColor: state.view === 'command' ? C.selected : C.panel }, line(`› ${commandDisplay}`, { color: state.view === 'command' ? C.ink : C.orange })),
         state.view === 'command' && width >= 70 && h(Button, { label: '↑', registry, id: 'recall-prev', action: () => model.action('command-recall', -1) }),
         state.view === 'command' && width >= 70 && h(Button, { label: '↓', registry, id: 'recall-next', action: () => model.action('command-recall', 1) }))),
     suggestionHeight > 0 && h(Suggestions, { state, model, width, rows: suggestionRows, registry }),
-    dockListOnly && h(Box, { height: 1, paddingX: 1, flexShrink: 0 }, line(truncate(dockHeader, width - 2), { color: C.orange, bold: true })),
     h(Box, { height: bodyHeight, flexShrink: 0 },
       suggestionHeight > 0 && bodyHeight < 5 ? null : split ? h(React.Fragment, null,
         h(List, { state, model, width: listWidth, height: bodyHeight, registry, offset }),
         h(activePanel, { state, model, width: rightWidth, height: bodyHeight, registry })) :
-        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up', 'rename'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: !dockListOnly })),
+        ['compose', 'confirm', 'decision', 'picker', 'folder', 'detail', 'notice', 'follow-up', 'rename'].includes(state.view) ? h(activePanel, { state, model, width, height: bodyHeight, registry }) : h(List, { state, model, width, height: bodyHeight, registry, offset, compactActions: true })),
     state.requiredNotice ? h(RequiredNotice, { state, width, onNoticeRendered }) : h(Box, { height: notificationHeight, paddingX: 1, flexShrink: 0, overflow: 'hidden', flexDirection: 'column' },
       h(Click, { registry, id: 'notice-detail', action: () => model.action('notice-open'), height: 2, flexShrink: 0, overflow: 'hidden' }, h(Text, { color: state.notice?.kind === 'warning' ? C.working : state.notice?.kind === 'success' ? C.done : C.muted, wrap: 'wrap' }, truncate(`${state.notice ? 'ⓘ ' : ''}${notice}`, width * 2 - 4)))),
     h(Box, { height: footerHeight, flexDirection: 'column', flexShrink: 0 },
@@ -591,9 +589,7 @@ export function TuiView({ state, model, url = '', width = 100, height = 28, regi
         boardActions && clearable && h(Button, { label: 'c Clear', registry, id: 'clear', action: () => model.action('clear') }),
         boardActions && clearableTasks && h(Button, { label: 'C All', registry, id: 'clear-closed', action: () => model.action('clear-closed') }),
         h(Box, { flexGrow: 1, minWidth: 0 }, line(footer, { color: C.muted }))),
-      dockListOnly && line('Ctrl+B then h returns to Shep', { color: C.faint }),
-      ...warningLines.map((part, index) => line(part, { key: `dock-warning-${index}`, color: C.working })),
-      !short && !dockListOnly && (
+      !short && (
         h(Box, { justifyContent: 'space-between' }, line(state.view === 'board' && !split ? `Selected: ${state.snapshot.agents.find(agent => agent.id === state.selectedId)?.paneId || 'none'}` : url, { color: C.faint }), line('Quit preserves agents', { color: C.faint })))));
 }
 
@@ -605,7 +601,6 @@ function App({ model, url, output, registry, onNoticeRendered }) {
   // state. Herdr can also report one extra column on entering alternate screen.
   const width = Math.max(1, Math.min(300, (size.columns || output.columns || 100) - 1));
   const height = Math.max(1, Math.min(120, (size.rows || output.rows || 28) - 1));
-  useEffect(() => { model.action('viewport-resized', width); }, [model, width]);
   const [offset, setOffset] = useState(0);
   const rows = boardRows(state);
   const header = height < 25 ? 2 : 4;
@@ -619,8 +614,10 @@ function App({ model, url, output, registry, onNoticeRendered }) {
     if (width < 39 || height < 14) { if (input === 'q' || key.ctrl && ['c', 'd'].includes(input)) model.action('quit'); return; }
     const mouse = parseMouse(input);
     if (mouse) {
-      if (mouse.release || state.busy) return;
+      if (mouse.release) return;
+      if (state.busy) { model.action('cancel-row-click'); return; }
       if ((mouse.button & 64) === 64) {
+        model.action('cancel-row-click');
         const direction = (mouse.button & 1) ? 1 : -1;
         if (state.view === 'board' || state.view === 'search') setOffset(previous => Math.max(0, Math.min(maxOffset, previous + direction * 3)));
         else if (state.view === 'picker') model.action('picker-move', direction);
@@ -628,9 +625,10 @@ function App({ model, url, output, registry, onNoticeRendered }) {
         else if (state.view === 'decision') model.action('decision-scroll', direction);
         return;
       }
-      if ((mouse.button & 3) !== 0) return;
+      if ((mouse.button & 3) !== 0) { model.action('cancel-row-click'); return; }
       const target = hitTest(mouse, registry.values(), measureElement);
-      target?.action();
+      if (target) target.action();
+      else model.action('cancel-row-click');
       return;
     }
     model.key(input, key);
@@ -648,7 +646,7 @@ export function startTui({ monitor, controller, registry: projects, getConfig, r
   let outputError = null;
   const outputFailed = error => { outputError = error; };
   output.on('error', outputFailed);
-  const model = createTuiModel({ monitor, controller, registry: projects, getConfig, reloadConfig, addTrustedRepo, summarize, onQuit, readModel: createModelReader(),
+  const model = createTuiModel({ monitor, controller, registry: projects, getConfig, reloadConfig, addTrustedRepo, summarize, onQuit, readModel: createModelReader(), readCodexModel: createCodexModelReader(), readAge: createAgeReader(),
     acknowledgeNotice: async (token, signal) => {
       if (!instance || stopped || signal.aborted || output.destroyed || outputError) throw new Error('The terminal cannot display the required location notice.');
       await instance.waitUntilRenderFlush();
@@ -672,15 +670,11 @@ export function startTui({ monitor, controller, registry: projects, getConfig, r
     // aligned while the frame remains bounded by the terminal dimensions.
     instance = render(h(App, { model, url, output, registry, onNoticeRendered: token => { renderedNotice = token; } }), { stdin: input, stdout: output, stderr: output, exitOnCtrlC: false, patchConsole: false, alternateScreen: true, interactive: true, incrementalRendering: false, maxFps: 30 });
     output.write(MOUSE_ON);
-    instance.waitUntilExit().then(async () => { if (!stopped) {
-      const restored = await model.restoreDock();
+    instance.waitUntilExit().then(() => { if (!stopped) {
       stop();
-      if (!restored) try { output.write('Shep dock: restore could not be confirmed. Inspect Herdr.\n'); } catch { /* Detached output. */ }
       onQuit?.();
-    } }, async error => {
-      const restored = await model.restoreDock();
+    } }, error => {
       stop();
-      if (!restored) try { output.write('Shep dock: restore could not be confirmed. Inspect Herdr.\n'); } catch { /* Detached output. */ }
       onQuit?.();
       process.exitCode = 1;
       try { output.write(`Shep terminal: ${safeText(error.message)}\n`); } catch { /* Detached output. */ }
@@ -690,6 +684,5 @@ export function startTui({ monitor, controller, registry: projects, getConfig, r
   stop.waitUntilRenderFlush = () => instance.waitUntilRenderFlush();
   stop.getTasks = model.getTasks;
   stop.showNotice = model.showNotice;
-  stop.restoreDock = model.restoreDock;
   return stop;
 }

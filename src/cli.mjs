@@ -182,27 +182,19 @@ Use Ctrl+C to stop Shep; agents keep running. Use q outside editors.`);
   const shutdown = () => {
     if (stopping) return shutdownPromise;
     stopping = true;
-    shutdownPromise = (async () => {
-      try {
-        // Keep the controller and Herdr socket alive until the real agent pane
-        // has been returned to its original location (or recovery is left for
-        // the next start). The TUI hook also cancels a pending selection timer.
-        const restored = await stopTerminal.restoreDock?.();
-        if (restored === false) process.stderr.write('Shep dock: restore is uncertain; inspect Herdr before moving this pane.\n');
-      } catch (error) {
-        process.stderr.write('Shep dock: restore is uncertain; inspect Herdr before moving this pane.\n');
-      } finally {
-        if (dispatchRuntime) dispatchRuntime.dispose();
-        else controller?.dispose();
-        monitor.stop();
-        stopTerminal();
-        server.close();
-        server.closeAllConnections();
-        process.off('SIGINT', shutdown);
-        process.off('SIGTERM', shutdown);
-        process.off('SIGHUP', shutdown);
-      }
-    })();
+    // Finish the current signal dispatch before removing handlers, otherwise
+    // Ink's signal-exit hook can resend SIGHUP after our synchronous cleanup.
+    shutdownPromise = Promise.resolve().then(() => {
+      if (dispatchRuntime) dispatchRuntime.dispose();
+      else controller?.dispose();
+      monitor.stop();
+      stopTerminal();
+      server.close();
+      server.closeAllConnections();
+      process.off('SIGINT', shutdown);
+      process.off('SIGTERM', shutdown);
+      process.off('SIGHUP', shutdown);
+    });
     return shutdownPromise;
   };
   process.on('SIGINT', shutdown);

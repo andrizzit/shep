@@ -102,30 +102,20 @@ export function editText(value, cursor, input, key = {}, multiline = false) {
   return { value: chars.join(''), cursor };
 }
 
-export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, readModel, now, onQuit = () => {} }) {
+export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, readModel, readCodexModel, readAge, now, onQuit = () => {} }) {
   let alive = true;
   let initialized = false;
   let submitting = false;
   let catalogGeneration = 0;
-  let dockReady = false;
-  let dockActivated = false;
-  let dockTimer = null;
-  let dockKey = null;
-  let dockJob = null;
-  let restoreJob = null;
-  let restoreOutcome = null;
   let quitting = false;
-  let lastRestoredTarget = null;
-  let dockRecoveryBlocked = false;
-  let dockNarrow = false;
+  let rowClick = null;
   const subscribers = new Set();
   let state = {
-    snapshot: monitor.getSnapshot(), modelInfoByAgent: {}, view: 'board', boardView: 'tasks', selectedTaskId: null, selectedId: null, filter: 'all', query: '', command: '',
+    snapshot: monitor.getSnapshot(), modelInfoByAgent: {}, ageInfoByAgent: {}, view: 'board', boardView: 'tasks', selectedTaskId: null, selectedId: null, filter: 'all', query: '', command: '',
     field: 'provider', cursor: { name: 0, subfolder: 0, prompt: 0, search: 0, command: 0, projectQuery: 0, folderPath: 0 },
     draft: { provider: '', name: '', projectKey: '', subfolder: '', prompt: '' },
     profiles: { providers: [], workspaces: [], defaultCwd: '', defaultWorkspaceId: '' },
     profilesLoading: true, profilesError: null, busy: null, notice: null,
-    dockEnabled: true, dockedTarget: null,
     confirmation: null, confirmClose: false, resultTarget: null,
     followUp: { target: null, text: '', cursor: 0, drafts: {}, returnView: 'board' },
     rename: { target: null, text: '', cursor: 0, error: null, returnView: 'board' },
@@ -141,21 +131,23 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     const rows = taskRows(state);
     if (!rows.some(row => row.id === state.selectedTaskId)) state = { ...state, selectedTaskId: rows[0]?.id || null };
     for (const subscriber of subscribers) subscriber();
-    if (dockReady) scheduleDock();
   }
   change({});
   const session = createTaskSession({ controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, read: () => state, change, inform });
   async function refreshModels(snapshot) {
-    if (!readModel || snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
+    readCodexModel?.retain?.(snapshot.agents.filter(agent => agent.provider === 'codex').map(agent => agent.terminalId));
+    if ((!readModel && !readCodexModel) || snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
     await Promise.all(snapshot.agents.map(async agent => {
+      const codex = agent.provider === 'codex';
       const sessionId = trustedSession(agent.provider, agent.sessionId);
-      if (!sessionId) return;
+      if (codex ? !readCodexModel || !agent.paneId || !agent.terminalId : !readModel || !sessionId) return;
       let info;
-      try { info = await readModel({ provider: agent.provider, sessionId }); }
+      try { info = await (codex ? readCodexModel({ paneId: agent.paneId, terminalId: agent.terminalId }) : readModel({ provider: agent.provider, sessionId })); }
       catch { /* Optional local metadata never blocks the board. */ }
       if (!alive) return;
+      if (codex && (state.snapshot.mode === 'demo' || state.snapshot.source.state !== 'connected')) return;
       const current = state.snapshot.agents.find(item => item.id === agent.id);
-      if (!current || current.provider !== agent.provider || trustedSession(current.provider, current.sessionId) !== sessionId
+      if (!current || current.provider !== agent.provider || !codex && trustedSession(current.provider, current.sessionId) !== sessionId
         || current.paneId !== agent.paneId || current.terminalId !== agent.terminalId) return;
       const previous = state.modelInfoByAgent[agent.id];
       if (previous?.model === info?.model && previous?.effort === info?.effort) return;
@@ -165,116 +157,49 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       change({ modelInfoByAgent });
     }));
   }
+  async function refreshAges(snapshot) {
+    if (!readAge) return;
+    readAge.retain?.(snapshot.agents.map(agent => agent.terminalId));
+    if (snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
+    await Promise.all(snapshot.agents.map(async agent => {
+      if (!agent.paneId || !agent.terminalId) return;
+      let info;
+      try { info = await readAge({ paneId: agent.paneId, terminalId: agent.terminalId }); }
+      catch { /* Missing process metadata leaves an empty terminal cell. */ }
+      if (!alive || state.snapshot.mode === 'demo' || state.snapshot.source.state !== 'connected') return;
+      const current = state.snapshot.agents.find(item => item.id === agent.id);
+      if (!current || current.provider !== agent.provider || current.paneId !== agent.paneId || current.terminalId !== agent.terminalId) return;
+      const valid = Number.isSafeInteger(info?.pid) && info.pid > 0 && Number.isFinite(info?.startedAt);
+      const previous = state.ageInfoByAgent[agent.id];
+      if (previous?.pid === (valid ? info.pid : undefined) && previous?.startedAt === (valid ? info.startedAt : undefined)) return;
+      const ageInfoByAgent = { ...state.ageInfoByAgent };
+      if (valid) ageInfoByAgent[agent.id] = { pid: info.pid, startedAt: info.startedAt };
+      else delete ageInfoByAgent[agent.id];
+      change({ ageInfoByAgent });
+    }));
+  }
   const unsubscribe = monitor.subscribe(snapshot => {
     // Keep fields local to this terminal. The monitor and control identities
     // remain the unchanged Herdr snapshot shared with the browser.
     const modelInfoByAgent = Object.fromEntries(Object.entries(state.modelInfoByAgent).filter(([id]) => {
       const before = state.snapshot.agents.find(agent => agent.id === id), after = snapshot.agents.find(agent => agent.id === id);
-      return before && after && before.provider === after.provider && trustedSession(after.provider, after.sessionId)
-        && trustedSession(before.provider, before.sessionId) === trustedSession(after.provider, after.sessionId)
+      return snapshot.mode !== 'demo' && before && after && before.provider === after.provider
+        && (after.provider === 'codex' ? Boolean(readCodexModel) : trustedSession(after.provider, after.sessionId)
+          && trustedSession(before.provider, before.sessionId) === trustedSession(after.provider, after.sessionId))
         && before.paneId === after.paneId && before.terminalId === after.terminalId;
     }));
-    change({ snapshot, modelInfoByAgent }); session.observe(snapshot); void refreshModels(snapshot);
+    const ageInfoByAgent = Object.fromEntries(Object.entries(state.ageInfoByAgent).filter(([id]) => {
+      const before = state.snapshot.agents.find(agent => agent.id === id), after = snapshot.agents.find(agent => agent.id === id);
+      return snapshot.mode !== 'demo' && before && after
+        && before.provider === after.provider && before.terminalId === after.terminalId && before.paneId === after.paneId;
+    }));
+    change({ snapshot, modelInfoByAgent, ageInfoByAgent }); session.observe(snapshot); void refreshModels(snapshot); void refreshAges(snapshot);
   });
   const selected = () => state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.agent : state.snapshot.agents.find(agent => agent.id === state.selectedId);
-  const selectedTask = () => state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
-  const sameDockIdentity = (a, b) => a?.terminalId && b?.terminalId && a.terminalId === b.terminalId && a.provider === b.provider;
-  function rebindTask(before, after) {
-    if (!before?.paneId || !after?.paneId || !sameDockIdentity(before, after)) return;
-    change({ tasks: state.tasks.map(task => task.target?.paneId === before.paneId && task.target?.terminalId === before.terminalId
-      && task.agent.provider === before.provider ? { ...task, target: { ...task.target, paneId: after.paneId } } : task),
-    snapshot: { ...state.snapshot, agents: state.snapshot.agents.map(agent => agent.paneId === before.paneId && sameDockIdentity(agent, before)
-      ? { ...agent, paneId: after.paneId } : agent) } });
-  }
-  function clearDockTimer() { if (dockTimer) clearTimeout(dockTimer); dockTimer = null; }
-  function dockSelection() {
-    const target = selected(), task = selectedTask();
-    if (!target || !target.paneId || !target.terminalId || !target.provider) return null;
-    if (target.paneId === state.profiles.ownPaneId || target.terminalId === state.profiles.ownTerminalId) return null;
-    if ([target.agentName, target.name].some(name => typeof name === 'string' && name.startsWith('shep-dock'))) return null;
-    if (target.launchPending === true || ['queued', 'starting'].includes(task?.launch.state)) return null;
-    return target;
-  }
-  function selectionDockKey() {
-    const target = selected(), task = selectedTask();
-    return JSON.stringify([state.boardView, state.boardView === 'tasks' ? state.selectedTaskId : state.selectedId,
-      target?.paneId, target?.terminalId, target?.provider, target?.agentName ?? target?.name,
-      trustedSession(target?.provider, target?.sessionId), target?.launchPending, task?.launch.state]);
-  }
-  function scheduleDock() {
-    if (!alive || !controller?.dock || !dockActivated || !state.dockEnabled || dockNarrow || !['board', 'search'].includes(state.view) || state.snapshot.mode === 'demo'
-      || state.snapshot.source.state !== 'connected' || state.busy || quitting) { clearDockTimer(); return; }
-    const target = dockSelection();
-    if ((!target && !state.dockedTarget) || (target && sameDockIdentity(state.dockedTarget, target))) { clearDockTimer(); return; }
-    const key = selectionDockKey();
-    if (key === dockKey) return;
-    dockKey = key;
-    clearDockTimer();
-    dockTimer = setTimeout(() => {
-      dockTimer = null;
-      if (key !== selectionDockKey()) return;
-      if (!dockSelection()) void restoreDock();
-      else dockJob = performDock(key);
-    }, 400);
-  }
-  async function performDock(key) {
-    if (!alive || !state.dockEnabled || key !== selectionDockKey() || !['board', 'search'].includes(state.view)) return;
-    const target = dockSelection();
-    if (!target || sameDockIdentity(state.dockedTarget, target)) return;
-    const before = state.dockedTarget;
-    change({ busy: 'dock' });
-    try {
-      const result = await controller.dock({ target: structuredClone(target) });
-      if (!alive) return;
-      if (result.restoredTarget && before) rebindTask(before, result.restoredTarget);
-      const dockedTarget = result.ok ? result.target ?? target : null;
-      if (dockedTarget) { restoreOutcome = null; rebindTask(target, dockedTarget); }
-      if (result.code === 'dock_narrow') dockNarrow = true;
-      if (!result.ok && (result.state === 'uncertain' || controller.getDockState?.())) dockRecoveryBlocked = true;
-      change({ busy: null, dockEnabled: result.ok || result.code === 'dock_narrow' ? state.dockEnabled : false,
-        dockedTarget: dockedTarget ?? (result.restoredTarget ? null : before),
-        ...(result.code === 'dock_narrow' ? {} : { notice: { message: safeText(result.message), kind: result.ok ? 'success' : 'warning' } }) });
-    } catch (error) {
-      if (alive) { dockRecoveryBlocked = true; change({ busy: null, dockEnabled: false, notice: { message: safeText(error.message || 'Docking failed. Inspect Herdr before trying again.'), kind: 'warning' } }); }
-    } finally { dockJob = null; }
-  }
-  async function performRestore() {
-    clearDockTimer();
-    if (dockJob) await dockJob;
-    const current = state.dockedTarget ?? controller?.getDockState?.()?.target;
-    if (!current || !controller?.undock) return true;
-    change({ busy: 'undock' });
-    try {
-      const result = await controller.undock();
-      if (!alive) return Boolean(result.ok);
-      if (result.ok) {
-        rebindTask(current, result.target ?? current);
-        lastRestoredTarget = result.target ?? current;
-        dockKey = sameDockIdentity(selected(), current) ? selectionDockKey() : null;
-        change({ busy: null, dockedTarget: null, notice: { message: safeText(result.message), kind: 'success' } });
-        return true;
-      }
-      change({ busy: null, notice: { message: safeText(result.message || 'The dock could not be restored. Inspect Herdr.'), kind: 'warning' } });
-      return false;
-    } catch (error) {
-      if (alive) change({ busy: null, notice: { message: safeText(error.message || 'The dock could not be restored. Inspect Herdr.'), kind: 'warning' } });
-      return false;
-    }
-  }
-  function restoreDock() {
-    if (restoreOutcome !== null) return Promise.resolve(restoreOutcome);
-    if (!restoreJob) restoreJob = performRestore().then(ok => {
-      restoreOutcome = ok;
-      if (!ok) { dockRecoveryBlocked = true; change({ dockEnabled: false }); }
-      return ok;
-    }).finally(() => { restoreJob = null; });
-    return restoreJob;
-  }
-  async function quit() {
+  function quit() {
     if (quitting) return;
     quitting = true;
-    if (await restoreDock()) onQuit();
-    else quitting = false;
+    onQuit();
   }
   function targetBlock(target, closing = false) {
     const blocked = controlBlock(state);
@@ -472,21 +397,31 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
   function moveSelection(direction) {
     const rows = state.boardView === 'tasks' ? taskRows(state) : visibleAgents(state);
     if (!rows.length) return;
-    dockActivated = true;
     const field = state.boardView === 'tasks' ? 'selectedTaskId' : 'selectedId';
     const index = rows.findIndex(row => row.id === state[field]);
     change({ [field]: rows[Math.max(0, Math.min(rows.length - 1, index + direction))].id, detailOffset: 0 });
   }
   function action(name, value) {
+    const clickingRow = name === 'click-agent' || name === 'click-task';
+    if (!clickingRow) rowClick = null;
+    if (name === 'cancel-row-click') return;
     if (name === 'quit') { void quit(); return; }
-    if (name === 'viewport-resized') { if (dockNarrow) { dockNarrow = false; dockKey = null; scheduleDock(); } return; }
-    if (name === 'dock-toggle') {
-      if (dockRecoveryBlocked) { inform('A leftover dock needs manual inspection in Herdr before docking again.', 'warning'); return; }
-      if (!state.dockEnabled) { dockActivated = true; dockNarrow = false; dockKey = null; change({ dockEnabled: true }); }
-      else { clearDockTimer(); dockKey = null; void restoreDock().then(ok => { if (ok && alive) change({ dockEnabled: false }); }); }
+    if (state.busy || state.requiredNotice) { rowClick = null; return; }
+    if (clickingRow) {
+      if (!['board', 'search', 'detail'].includes(state.view)) { rowClick = null; return; }
+      const task = name === 'click-task';
+      const row = (task ? taskRows(state) : visibleAgents(state)).find(item => item.id === value);
+      if (!row) { rowClick = null; return; }
+      const agent = task ? row.agent : row;
+      const identity = JSON.stringify([name, value, agent?.provider, agent?.paneId, agent?.terminalId, trustedSession(agent?.provider, agent?.sessionId)]);
+      const at = new Date(now?.() ?? Date.now()).getTime();
+      const double = rowClick?.identity === identity && at >= rowClick.at && at - rowClick.at <= 400;
+      rowClick = null;
+      action(task ? 'select-task' : 'select', value);
+      if (double) action('focus');
+      else rowClick = { identity, at };
       return;
     }
-    if (state.busy || state.requiredNotice) return;
     if (state.view === 'rename') {
       if (name === 'rename-send') void sendRename();
       else if (name === 'cancel') change({ view: state.rename.returnView });
@@ -510,8 +445,8 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       return;
     }
     if (name === 'board-toggle') { if (['board', 'search', 'detail'].includes(state.view)) change({ boardView: state.boardView === 'tasks' ? 'agents' : 'tasks', detailOffset: 0 }); return; }
-    if (name === 'select-task') { if (['board', 'search'].includes(state.view)) { dockActivated = true; change({ selectedTaskId: value, detailOffset: 0 }); } return; }
-    if (name === 'details') { if (state.dockedTarget) return; if (['board', 'search'].includes(state.view)) { change({ view: 'detail', detailOffset: 0 }); if (state.boardView === 'tasks') session.inspect(state.selectedTaskId); } return; }
+    if (name === 'select-task') { if (['board', 'search', 'detail'].includes(state.view)) change({ selectedTaskId: value, detailOffset: 0 }); return; }
+    if (name === 'details') { if (['board', 'search'].includes(state.view)) { change({ view: 'detail', detailOffset: 0 }); if (state.boardView === 'tasks') session.inspect(state.selectedTaskId); } return; }
     if (name === 'notice-open') { if (state.notice) change({ view: 'notice', noticeDetail: { ...state.notice }, detailOffset: 0 }); return; }
     if (name === 'detail-scroll') { if (['board', 'detail', 'notice'].includes(state.view)) change({ detailOffset: Math.max(0, state.detailOffset + value) }); return; }
     if (name === 'detail-position') { change({ detailOffset: value }); return; }
@@ -525,9 +460,9 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     if (name === 'field-next') { if (state.view === 'compose') cycleField(value); return; }
     if (state.view === 'command' && ['select', 'focus', 'close', 'new', 'search', 'filter'].includes(name)) return;
     if (name === 'command') { const command = state.command || '/dispatch '; change({ view: 'command', command, cursor: { ...state.cursor, command: graphemes(command).length } }); updateSuggestions(); return; }
-    if (name === 'select') { if (state.view === 'board' || state.view === 'search') { dockActivated = true; change({ selectedId: value, selectedTaskId: taskRows(state).find(row => row.agent?.id === value)?.id || state.selectedTaskId }); } return; }
+    if (name === 'select') { if (['board', 'search', 'detail'].includes(state.view)) change({ selectedId: value, selectedTaskId: taskRows(state).find(row => row.agent?.id === value)?.id || state.selectedTaskId, detailOffset: 0 }); return; }
     if (name === 'field') { if (state.view === 'compose') { if (value === 'projectKey') action('pick-project'); else if (state.field === value && value === 'provider') cycleChoice(1); else change({ field: value }); } return; }
-    if (name === 'refresh') { dockNarrow = false; dockKey = null; void monitor.refresh?.(); void refreshProfiles(); void session.refresh({ force: true }); scheduleDock(); return; }
+    if (name === 'refresh') { void monitor.refresh?.(); void refreshProfiles(); void session.refresh({ force: true }); return; }
     if (name === 'search') { change({ view: 'search', cursor: { ...state.cursor, search: graphemes(state.query).length } }); return; }
     if (name === 'filter') {
       const filters = state.boardView === 'tasks' ? TASK_FILTERS : TASK_FILTERS.filter(filter => filter === 'all' || Object.hasOwn(STATUS_LABELS, filter));
@@ -552,20 +487,20 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       // The controller may know the newly created native target before the
       // public monitor does. It still validates the exact captured identity.
       if (!target && task?.target && task.live.status !== 'closed') void run('focus', { ...task.target, id: task.target.terminalId, name: task.name }, true);
-      else void run('focus', sameDockIdentity(target, state.dockedTarget) ? state.dockedTarget : target, Boolean(state.dockedTarget && sameDockIdentity(target, state.dockedTarget)));
+      else void run('focus', target);
       return;
     }
     if (name === 'close') {
       const target = selected();
       const blocked = targetBlock(target);
       if (blocked) inform(blocked, 'warning');
-      else if (sameDockIdentity(target, state.dockedTarget)) void restoreDock().then(ok => { if (ok && alive) change({ view: 'confirm', confirmation: structuredClone(lastRestoredTarget ?? selected() ?? target), confirmClose: false }); });
       else change({ view: 'confirm', confirmation: structuredClone(target), confirmClose: false });
       return;
     }
     if (name === 'confirm-close') { void run('closeAgent', state.confirmation); return; }
   }
   function key(input, key = {}) {
+    rowClick = null;
     if (key.eventType === 'release') return;
     // Ink can deliver typed text and a following Enter/Tab in the same chunk.
     // Bracketed paste has its own channel and never enters this branch.
@@ -659,7 +594,6 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     }
     if (state.view === 'detail' || state.view === 'notice') {
       if (key.escape || key.leftArrow) action('cancel');
-      else if (input === 't' && state.view === 'detail') action('dock-toggle');
       else if (key.downArrow || input === 'j' || key.pageDown) action('detail-scroll', 1);
       else if (key.upArrow || input === 'k' || key.pageUp) action('detail-scroll', -1);
       else if (key.return && state.view === 'detail') action('focus');
@@ -672,7 +606,6 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
       return;
     }
     if (input === 'q') action('quit');
-    else if (input === 't') action('dock-toggle');
     else if (input === 'g') action('board-toggle');
     else if (input === 'i') action('notice-open');
     else if (key.rightArrow || input === 'd') action('details');
@@ -696,27 +629,25 @@ export function createTuiModel({ monitor, controller, registry, getConfig, reloa
     else if (key.escape) change({ query: '', filter: 'all' });
   }
   const modelKey = key;
-  const ready = Promise.all([refreshProfiles(), session.refresh(), refreshModels(state.snapshot)]).then(async () => {
+  const ready = Promise.all([refreshProfiles(), session.refresh(), refreshModels(state.snapshot), refreshAges(state.snapshot)]).then(async () => {
     if (!alive) return;
+    // Upgrade recovery only: older Shep versions could leave an agent pane
+    // beside this one. Normal selection and shutdown never move panes.
     if (controller?.recoverDock && state.snapshot.mode === 'live' && state.snapshot.source.state === 'connected') {
       try {
         const result = await controller.recoverDock();
-        if (alive && !result.ok) { dockRecoveryBlocked = true; change({ dockEnabled: false }); }
         if (alive && (!result.ok || result.target)) inform(result.message, result.ok ? 'success' : 'warning');
       } catch (error) {
-        dockRecoveryBlocked = true;
-        if (alive) change({ dockEnabled: false, notice: { message: safeText(error.message || 'Leftover dock could not be restored. Inspect Herdr.'), kind: 'warning' } });
+        if (alive) inform(error.message || 'Leftover dock could not be restored. Inspect Herdr.', 'warning');
       }
     }
-    if (!alive) return;
-    dockReady = true;
-    scheduleDock();
   });
   return { getSnapshot: () => state, subscribe: callback => { subscribers.add(callback); return () => subscribers.delete(callback); },
     action, key, paste: text => {
+      rowClick = null;
       if (state.busy) return;
       if (state.view === 'board' && text.startsWith('/')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
       else if (['compose', 'search', 'command', 'picker', 'folder', 'follow-up', 'rename'].includes(state.view)) edit(text, {}, true);
     }, ready,
-    selected, targetBlock, pickerItems, getTasks: session.getTasks, showNotice: inform, restoreDock, destroy: () => { clearDockTimer(); session.destroy(); alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
+    selected, targetBlock, pickerItems, getTasks: session.getTasks, showNotice: inform, destroy: () => { session.destroy(); alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
 }

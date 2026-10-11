@@ -1,6 +1,6 @@
 # Shep operating procedure
 
-**Applies to:** Shep 0.4.0-checkpoint.9.4, the local project-aware dispatch preview inside Herdr.
+**Applies to:** Shep 0.4.0-checkpoint.9.5, the local project-aware dispatch preview inside Herdr.
 
 **Scope:** Single-agent dispatch, project targeting, explicit worktree placement, a task board, notifications, change summaries, follow-ups and manual task clearing. Later fan-out, templates, named profiles, persisted history and worktree cleanup controls are deferred.
 
@@ -36,7 +36,7 @@ If Shep is already visible in the pane to the right of your chat, click into tha
 
 Shep shows agents across all workspaces in the current Herdr instance. It does not aggregate other Herdr instances, remote machines, unrelated terminals, or internal subagents that Herdr does not expose.
 
-Use at least a 40-column by 15-row terminal pane. The live agent dock needs enough room in Shep's pane for at least 60 columns of Shep and 80 columns of agent terminal.
+Use at least a 40-column by 15-row terminal pane.
 
 **Expected result:** a live overview with Tasks/Agents views, a command input, and the correct default project directory.
 
@@ -167,11 +167,15 @@ Press **g** to switch views. Tasks are grouped by project and show this run's di
 
 Rows lead with a bold name, status and dimmed provider. Needs you sorts first within its group, Working is bright and Done muted. A second line appears only for an attention reason or finished-task changes. Short differing folders replace repeated full paths; details keep the full path and show IDs at the bottom.
 
-Terminal rows align name, status, provider, model, effort and folder or age in columns. For **Claude and Grok**, model and effort use separate dimmed cells; missing cells preserve later columns. Every Claude family uses the same short format, such as `opus 5.5` or `fable 5.1`. Open details to see full IDs. At 110 columns or wider the list always uses 70% of the pane, keeping the divider still when model details appear. Gaps grow with the list's width. Narrow panes drop effort and model first, then folder or age, preserving name and status; details keep the fields. The browser snapshot is unchanged.
+Terminal rows align name, status, provider, model, effort, age and folder in columns. For **Claude, Grok and verified Codex sessions**, model and effort use separate dimmed cells; missing cells preserve later columns. Every Claude family uses the same short format, such as `opus 5.5` or `fable 5.1`. Open details to see full IDs. At 110 columns or wider the list always uses 70% of the pane, keeping the divider still when model details appear. Gaps grow with the list's width. Narrow panes drop effort, model, age and folder in that order, preserving name and status; details keep the fields. The browser snapshot is unchanged.
 
-Model details need a Herdr session integration. Install the matching integration yourself with `herdr integration install claude` or `herdr integration install grok`, then start a new agent. Agents started before installation may lack a session ID. **Codex model and effort are not shown:** Herdr's current Codex hooks run in a shared `codex app-server`, which can report session IDs to the wrong pane. Shep ignores those IDs for identity and model lookup until [Herdr](https://herdr.dev/) fixes its integration. Re-check after a Codex or Herdr update. Codex dispatch and monitoring remain available; Shep does not guess session IDs.
+The age column measures the running agent process, including agents started outside Shep and those found after restarting Shep. It uses `<1m`, `Nm`, `Nh` or `Nd`; details show “Running for 2h 14m (since 20:57)” with the local start time; durations with days also include the local start date. For `codex resume`, this is the new process's age, not the age of the resumed conversation. A folder does not hide the age. Starting tasks without a detected process, ambiguous matches and failed process checks leave it blank. Process checks refresh at most every 30 seconds, while the displayed age advances from the cached start at each render. An exited helper missing from `ps` does not blank a surviving direct child. Known ages remain visible through STALE for unchanged identities; process checks pause until reconnection. Only IDs and elapsed times are used; age is kept in terminal memory and is absent from the browser snapshot and files.
 
-Shep uses only the exact Herdr session ID. It reads at most the final 64 KiB of `~/.claude/projects/*/<session-id>.jsonl` (assistant `message.model`/`effort`) or `~/.grok/sessions/*/<session-id>/chat_history.jsonl` (assistant `model_id`/`reasoning_effort`). Only those fields are extracted; conversation text is not retained. The reader caches identity, size and modification time and refreshes at most every ten seconds. It reuses a safely validated session path instead of walking directories each refresh. Invalid or partial lines are skipped; the last verified fields remain when the same file grows without a complete assistant record in its tail. A replacement, unreadable or unsafe file cannot inherit them. An unrecorded selection between turns cannot appear yet. There are no provider-folder writes or new history files. Unsafe IDs, symlinks, ambiguous sessions or logs without verified fields produce no model details; Shep never uses a folder match or configuration default.
+Claude and Grok model details need a Herdr session integration. Install the matching integration yourself with `herdr integration install claude` or `herdr integration install grok`, then start a new agent. Agents started before installation may lack a session ID. **Codex** uses the pane's foreground process and its uniquely owned root session log, with model and effort from the latest `turn_context`. Standalone sessions, including `codex --no-daemon`, support this lookup. For shared-server clients, Shep matches the foreground process’s local listening endpoint to exactly one loaded root session and reads its live model and effort from the existing server. Herdr Codex hook IDs remain untrusted for model lookup and control identity. Shep does not restart agents, change configuration, or guess from folders, arguments or defaults.
+
+For Claude and Grok, Shep uses only the exact Herdr session ID. It reads at most the final 64 KiB of `~/.claude/projects/*/<session-id>.jsonl` (assistant `message.model`/`effort`) or `~/.grok/sessions/*/<session-id>/chat_history.jsonl` (assistant `model_id`/`reasoning_effort`). Only those fields are extracted; conversation text is not retained. The reader caches identity, size and modification time and refreshes at most every ten seconds. It reuses a safely validated session path instead of walking directories each refresh. Invalid or partial lines are skipped; the last verified fields remain when the same file grows without a complete assistant record in its tail. A replacement, unreadable or unsafe file cannot inherit them. An unrecorded selection between turns cannot appear yet. There are no provider-folder writes or new history files. Unsafe IDs, symlinks, ambiguous sessions or logs without verified fields produce no model details; Shep never uses a folder match or configuration default.
+
+For Codex, process lookup projects PID, parent PID, executable, open-file paths and local listening endpoints. A safe regular `~/.codex/sessions/YYYY/MM/DD/` log must have matching root session metadata (at most 64 KiB from the head); only model and effort are extracted while scanning backward through at most the final 32 MiB in 64 KiB chunks. Shared clients use the existing local WebSocket control socket with read-only session and endpoint queries. Subagents, ambiguous roots, incomplete server responses, changed listeners, unsafe paths or process replacement leave blank fields. The server lookup never starts or resumes a session, sends a turn, or calls a tool. Refreshes are limited to once every ten seconds. Model/effort remain private to terminal state and survive STALE for an unchanged pane and terminal, with reads paused. No provider files are written.
 
 The overview refreshes roughly every two seconds. Press **r** from the overview to request a refresh. Shep displays Herdr's state; it does not independently judge whether a coding task is correct.
 
@@ -188,17 +192,16 @@ To find an agent:
 
 While typing in a command, search, or prompt field, ordinary letters such as `q`, `x`, and `f` are text. Leave the editor before using overview shortcuts.
 
+
 ## 7. Open an agent and continue its work
 
-1. Select an agent with **Up/Down**, **j/k**, or a mouse click.
-2. When Shep's pane has room for at least 60 columns of Shep and 80 columns of agent terminal, pause for about 400 ms. Shep moves the selected agent's real pane to the right, giving it about 65% of the space while keeping focus on Shep's list. The header shows name, status, provider, model and effort when known. Shep uses its compact list layout when its side is narrow.
-3. Press **Enter**, or click **Focus**, to move Herdr's focus to that agent. In a narrow tab or with the dock off, Enter focuses the agent in its original location as before.
-4. Read its output and enter any follow-up directly into its own input.
-5. From the right dock, press Herdr's default **Ctrl+B**, then **h** to focus the Shep pane on the left. If you changed Herdr's `focus_pane_left` binding, use your configured key. You can also click Shep's pane.
+1. Single click an agent row to select it, like **Up/Down** or **j/k**. Double click to open its existing Herdr pane, or press **Enter** or click **Focus** after selecting it.
+2. Read its output and enter any follow-up directly into its own input.
+3. Return to Shep through Herdr's tab or pane navigation, or click its pane.
 
-A mouse click on an agent row selects it. On a wide dock, switching brings the next agent pane in before returning the previous one to its original tab and split position. When there is not room for both agent panes, Shep returns the previous one first. Press **t** to turn off the dock and show Shep's details panel; press **t** again to resume docking. Shep leaves agents that are still starting in place. The dock moves a pane; it does not send text or keys to it.
+Arrows select without moving focus. Shep keeps each agent in its original location; the automatic terminal dock and **t** toggle have been removed. The metadata details panel remains available through **d** or **Right**.
 
-Herdr 0.9.1 does not swap panes across tabs, so Shep keeps a `shep-dock` labeled placeholder in the agent's original tab and moves the real pane beside Shep. While docked, the original tab reads **`<agent name> · in Shep`** and the agent appears in Shep's tab; **t** returns the agent and restores the original tab label. Shep stores tab labels in the recovery marker only when both titles fit within 128 UTF-8 bytes; longer titles remain unchanged and Shep shows a warning. On a wide dock, switching brings the next agent pane in before returning the previous one so Shep's width stays steady. Turning the dock off, pressing **q** or **Ctrl+C**, and closing a docked agent with **x** return it first. If the placeholder is running a command, Shep restores the agent beside it, removes the marker, leaves the busy pane open, and shows a notice. **Quit Shep with q before closing this tab — closing the tab also closes the docked agent.** Closing only Shep's pane sends SIGHUP, which makes Shep try one restore before exiting. After a crash, the next Shep startup uses the placeholder to restore the agent when its identity can be verified. If the original tab was closed, Shep returns it to a new tab labeled with the agent name in its original workspace; if the workspace was closed, it can use a new workspace. If a dock ends uncertain and Shep confirms the agent remains in its tab, it sends one Herdr notification with the request sound alongside the existing notice. Inspect Herdr before moving it manually; Shep does not retry uncertain moves.
+When upgrading from a dock-enabled version, quit the old Shep with **q** first. Startup can restore a leftover dock from an older crash when its marker and agent identity can be verified; uncertain recovery shows a notice for inspection in Herdr.
 
 To continue the same conversation from Shep, select the task or agent and press **p** (also available in details). Check the name, pane and status shown above the editor. Type or paste multiline text; Enter adds a newline. **Ctrl+S** sends once and **Esc** cancels while retaining that agent's draft in memory. Another `/dispatch` creates another agent.
 
@@ -356,7 +359,7 @@ Quit the running Shep process, then build and install from the source directory:
 ```sh
 npm ci --ignore-scripts
 npm pack
-npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.9.4.tgz --offline --ignore-scripts --no-audit --no-fund
+npm install --global --prefix "$HOME/.local" ./shep-herdr-plugin-0.4.0-checkpoint.9.5.tgz --offline --ignore-scripts --no-audit --no-fund
 shep --version
 ```
 
