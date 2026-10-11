@@ -390,4 +390,4 @@ Then reopen Shep in the desired Herdr pane. No npm registry release is required 
 7. Close finished agents with x and an explicit confirmation.
 8. Quit Shep with q when finished monitoring, or leave it open while agents continue.
 
-See the [README](../README.md) for the project overview, optional plugin pane shortcut, and development checks.
+See the [README](../README.md) for the project overview and quick start, and the [reference](REFERENCE.md) for all controls, the optional plugin pane shortcut, privacy details and development checks.
