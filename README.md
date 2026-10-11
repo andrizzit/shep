@@ -9,9 +9,9 @@ Shep is a terminal dashboard for dispatching and managing coding agents inside [
 
 It runs locally and uses your existing agent installations and authentication. A read-only browser companion is available at [localhost:4317](http://localhost:4317) while Shep is running.
 
-![Shep browser companion showing sample agents](docs/images/shep-desktop.png)
+![Shep task board grouped by project, with model, effort and running age](docs/images/shep-terminal.png)
 
-*Browser preview uses clearly labeled sample agents. Shep reads live status from Herdr when you run it normally.*
+*Current terminal UI rendered with sample projects, agents, models and ages. The browser companion is shown in the [operating guide](docs/SOP.md#11-use-the-browser-companion-or-demo).*
 
 ## What you get
 
@@ -117,7 +117,7 @@ Dispatch normally uses the project's main folder, so coordinate shared edits. `+
 | `Esc` | Leave an editor or dialog |
 | `q` / `Ctrl+C` | Quit Shep; agents keep running |
 
-Use `q` from the overview; letters are ordinary text while editing. Tasks, drafts and command recall last for the current run. After reopening, still-running agents appear in the Agents view.
+Use `q` from the overview; letters are ordinary text while editing. Tasks, drafts and command recall last for the current run. After reopening, still-running agents are rediscovered in both views.
 
 ## Local data and privacy
 

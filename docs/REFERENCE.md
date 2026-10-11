@@ -38,8 +38,9 @@ For browser setup and sample-data previews, see the [browser workflow](SOP.md#11
 | --- | --- |
 | `↑` / `↓` or `k` / `j` | Select an agent |
 | `Enter` | Focus the selected agent in its existing Herdr pane |
+| Single click / double click | Select a row / open its existing Herdr pane |
 | `/` | Enter `/dispatch [provider][@project][:] your task`; press Enter to launch |
-| `g` | Switch Tasks / Agents |
+| `g` | Switch Tasks grouped by project / Agents grouped by provider |
 | `d` / `→` | Open selected task or agent details; use Up/Down to scroll |
 | `i` | Read the full notice, including long diagnostic paths |
 | `n` | New agent: choose provider, project, name and task |
@@ -48,7 +49,7 @@ For browser setup and sample-data previews, see the [browser workflow](SOP.md#11
 | `Enter` in command input | Accept after an arrow selection; otherwise dispatch |
 | `←` / `→` | Change the selected composer option |
 | `Ctrl+S` | Submit the composer or send the follow-up once |
-| `s` | Search agents and workspaces |
+| `s` | Search the current view: Tasks by task/name/provider/project; Agents by name/provider/pane/workspace/path |
 | `f` | Cycle status filters |
 | `p` | Open a follow-up editor for the selected task or agent |
 | `e` | Rename the selected agent; Enter saves, Esc cancels |
@@ -66,7 +67,9 @@ Pasted multiline prompts remain prompt text rather than keyboard shortcuts. Mous
 
 The terminal uses **Starting**, **Working**, **Needs you**, **Done**, **Failed** and briefly **Closed**. Needs you covers a reported block, startup input or uncertain delivery. Failed means the agent could not start, with a short reason. Unknown native status displays Starting. A startup agent that is idle without observed work/completion shows Needs you; after observed work, idle displays Done. Done does not prove your specific task succeeded. A later observed Working or Done state replaces an earlier attention outcome.
 
-Status accuracy follows Herdr's detectors. The read-only browser retains its native Working, Needs input, Done, Idle and Unknown labels. Names lead each row, with Needs you first within its group, bright Working and muted Done. Attention also has a text marker under NO_COLOR. Rows show a short differing folder, not a repeated absolute path; task details retain full paths and dimmed IDs. Reading the overview does not mark work seen; focusing an agent does. If Herdr becomes unavailable, retained data is marked stale and controls are disabled.
+Shep opens in Tasks, grouped by project, including detected agents started outside Shep. Unmatched agents appear under Other. Press **g** for Agents grouped by provider. After restarting, task records are gone but current agents are rediscovered in both views.
+
+Status accuracy follows Herdr's detectors. The read-only browser groups agents by provider and retains its native Working, Needs input, Done, Idle and Unknown labels. Names lead each terminal row, with Needs you first within its group, bright Working and muted Done. Attention also has a text marker under NO_COLOR. The folder cell is blank at a known project's root; differing subfolder/worktree names appear there. Details retain full paths and dimmed IDs. Reading the overview does not mark work seen; focusing an agent does. If Herdr becomes unavailable, retained data is marked stale and controls are disabled.
 
 The scope is **one current Herdr instance**. Agents in other instances, other terminal applications, remote machines, or internal subagents that Herdr does not expose are not shown. Startup requires the host-provided socket and pane context; there is no manual session selector. `--session` is rejected and `SHEP_SESSION` is ignored.
 
@@ -78,7 +81,7 @@ Age works for Shep launches, agents started elsewhere in the current Herdr insta
 
 ### Model and reasoning effort
 
-For **Claude, Grok and verified Codex sessions**, terminal rows align name, status, provider, model, effort, age and folder in columns. Missing values leave an empty cell so later columns stay aligned. Claude names are shortened consistently, such as `opus 5.5` or `fable 5.1`; details show the full model ID and effort. At 110 columns or wider the list always gets 70% of the pane, so model fields appearing do not move the divider. Column gaps grow with the list's width. Narrow panes drop effort, model, age and folder in that order, preserving names and statuses. Missing data adds no placeholder. The read-only browser and `/api/snapshot` do not receive these fields.
+For **Claude, Grok and verified Codex sessions**, terminal rows align name, status, provider, model, effort, age and folder in columns. Missing values leave an empty cell so later columns stay aligned. Claude names are shortened consistently, such as `opus 5.5` or `fable 5.1`; details show the full model ID and effort. At 110 columns or wider, when the board area is tall enough for a split, the list gets 70% of the pane, so model fields appearing do not move the divider. Shorter panes use the full width for the board; **d** or **Right** opens metadata details. Column gaps grow with the list's width. Narrow panes drop effort, model, age and folder in that order, preserving names and statuses. Missing data adds no placeholder. The read-only browser and `/api/snapshot` do not receive these fields.
 
 Claude and Grok need the provider's Herdr integration and a session ID reported by an agent started **after** installation. Install the appropriate integration yourself:
 

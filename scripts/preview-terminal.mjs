@@ -1,5 +1,6 @@
 // Optional visual check of the actual ANSI frame, not a screenshot of the host app.
-import { writeFile, mkdtemp, mkdir } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { writeFile, mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,10 +18,37 @@ const controller = {getProfiles:async () => ({
   providers:[{id:'codex',name:'Codex',available:true},{id:'claude',name:'Claude',available:true},{id:'grok',name:'Grok',available:true}],
   workspaces:[{id:'w1',name:'shep',path:'/projects/shep'}],defaultWorkspaceId:'w1',defaultCwd:'/projects/shep',ownPaneId:'preview',
 })};
-const model = createTuiModel({monitor,controller});
-await model.ready;
-const ansi = renderToString(React.createElement(TuiView, {state:model.getSnapshot(),model,width:118,height:40,url:'http://localhost:4317'}), {columns:118});
-model.destroy();
+// In-memory sample projects only: never discover the owner's repositories or
+// query running agents to make a public documentation image.
+const projects = ['shep', 'atlas-web', 'payments-api'].map(name => ({
+  key: `sample:${name}`, name, aliases: [], kind: 'git', root: `/projects/${name}`,
+  isolation: 'auto', workspaceIds: [], sources: ['session'], worktrees: [],
+}));
+const registry = {
+  refresh: async () => {},
+  getSnapshot: () => ({projects,trustRequired:[],warnings:[]}),
+  containing: path => projects.find(project => path === project.root || path?.startsWith(project.root + '/')),
+};
+const model = createTuiModel({monitor,controller,registry});
+let ansi;
+try {
+  await model.ready;
+  const state = model.getSnapshot();
+  // Demo mode skips real metadata readers. Inject clearly labeled synthetic
+  // values into this render only so the current columns appear in the preview.
+  const sampleModels = {
+    claude: {model:'claude-opus-5-5',effort:'high'},
+    codex: {model:'gpt-6.1-sol',effort:'xhigh'},
+  };
+  const startedAt = Date.now();
+  const ageMinutes = [134,42,195,2908,18,null,65];
+  state.modelInfoByAgent = Object.fromEntries(demo.agents.filter(agent => sampleModels[agent.provider]).map(agent => [agent.id,sampleModels[agent.provider]]));
+  state.ageInfoByAgent = Object.fromEntries(demo.agents.flatMap((agent,index) => ageMinutes[index] == null ? [] : [[agent.id,{pid:1000+index,startedAt:startedAt-ageMinutes[index]*60000}]]));
+  ansi = renderToString(React.createElement(TuiView, {state,model,width:150,height:30,url:'http://localhost:4317'}), {columns:150});
+  const frame = ansi.replace(/\x1b\[[\d;]*m/g,'');
+  for (const expected of ['DEMO', 'TASKS', 'atlas-web (', 'payments-api (', 'shep (', 'n New agent', 'gpt-6.1-sol', 'xhigh', 'Double click / Enter to focus']) assert.ok(frame.includes(expected), `Preview is missing ${expected}`);
+  assert.ok(!frame.includes('YOUR AGENTS'), 'Preview must show the default project board.');
+} finally { model.destroy(); }
 const escape = text => text.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 // Browsers add font leading around block glyphs; a terminal fills the full cell.
 // Paint half-block cells directly so the preview preserves the pixel mascot.
@@ -70,10 +98,14 @@ const directory = await mkdtemp(join(tmpdir(),'shep-terminal-preview-'));
 const htmlPath = join(directory,'preview.html');
 await writeFile(htmlPath,html);
 await mkdir('docs/images',{recursive:true});
-const browser = await chromium.launch({headless:true});
+let browser;
 try {
+  browser = await chromium.launch({headless:true});
   const page = await browser.newPage({viewport:{width:960,height:1300}});
   await page.goto(pathToFileURL(htmlPath).href);
   await page.locator('main').screenshot({path:'docs/images/shep-terminal.png'});
   console.log('Rendered ANSI preview: docs/images/shep-terminal.png');
-} finally { await browser.close(); }
+} finally {
+  await browser?.close();
+  await rm(directory,{recursive:true,force:true});
+}
