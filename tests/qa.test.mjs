@@ -263,16 +263,18 @@ test('QA: CLI in a controlled Herdr pane serves explicit demo state and releases
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
   const exited = childResult(child);
   let output = '';
-  child.stdout.on('data', (part) => { output += part; });
-  child.stderr.on('data', (part) => { output += part; });
-  let snapshot;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try {
-      snapshot = JSON.parse((await request({ address: () => ({ port }) }, '/api/snapshot')).body);
-      if (snapshot.source.state === 'connected') break;
-    } catch { /* Startup is asynchronous; the loop is bounded. */ }
-    await delay(20);
-  }
+  const ready = deferred();
+  const collect = part => {
+    output += part;
+    // The URL is announced only after the initial snapshot and server listen.
+    if (output.includes(`http://localhost:${port}`)) ready.resolve();
+  };
+  child.stdout.on('data', collect);
+  child.stderr.on('data', collect);
+  await Promise.race([ready.promise, exited.then(() => assert.fail('Demo CLI exited before announcing its URL: ' + output))]);
+  const response = await request({ address: () => ({ port }) }, '/api/snapshot');
+  assert.equal(response.status, 200);
+  const snapshot = JSON.parse(response.body);
   assert.equal(snapshot?.source.state, 'connected', output);
   assert.equal(snapshot.mode, 'demo');
   assert.ok(snapshot.agents.length > 0);

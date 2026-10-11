@@ -1,14 +1,22 @@
 import { stripVTControlCharacters } from 'node:util';
 import { safeText } from './terminal.mjs';
+import { createTaskSession, taskRows, taskPresentation, matchesTask, commandSuggestions, TASK_FILTERS } from './tui-tasks.mjs';
+import { PATTERNS, validatePrompt } from './dispatch/contracts.mjs';
+import { sessionMatches, trustedSession } from './agent-identity.mjs';
 
-export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs input', done: 'Done', idle: 'Idle', unknown: 'Unknown' });
-export const FIELDS = ['provider', 'name', 'workspaceId', 'cwd', 'prompt', 'dispatch'];
+export const STATUS_LABELS = Object.freeze({ working: 'Working', blocked: 'Needs you', done: 'Done', idle: 'Done', unknown: 'Starting' });
+export const FIELDS = ['provider', 'projectKey', 'subfolder', 'name', 'prompt', 'dispatch'];
 const priority = { blocked: 0, working: 1, done: 2, idle: 3, unknown: 4 };
 const providerNames = new Map([['claude', 'Claude'], ['codex', 'Codex'], ['grok', 'Grok'], ['kiro', 'Kiro']]);
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 export const graphemes = value => [...segmenter.segment(String(value))].map(item => item.segment);
 export const knownStatus = agent => Object.hasOwn(STATUS_LABELS, agent?.status) ? agent.status : 'unknown';
 export const providerName = provider => providerNames.get(provider) || safeText(provider || 'Other');
+export function agentPresentation(state, agent) {
+  const status = knownStatus(agent), task = state.tasks?.find(task => !task.dismissed && matchesTask(task, agent));
+  const presentation = taskPresentation({ task, status });
+  return ['needs_input', 'needs_confirmation', 'uncertain'].includes(presentation) ? 'blocked' : presentation;
+}
 
 export function parseDispatch(command, providers) {
   const match = /^\/dispatch(?:[ \t]+([\s\S]*))?$/.exec(command);
@@ -44,11 +52,11 @@ export function visibleAgents(state) {
   const query = safeText(state.query).trim().toLocaleLowerCase();
   const order = ['claude', 'codex', 'grok', 'kiro'];
   return (state.snapshot.agents || []).filter(agent => {
-    if (state.filter !== 'all' && knownStatus(agent) !== state.filter) return false;
+    if (state.filter !== 'all' && STATUS_LABELS[agentPresentation(state, agent)] !== STATUS_LABELS[state.filter]) return false;
     return !query || [agent.name, agent.provider, agent.paneId, agent.workspace?.name, agent.workspace?.path].join(' ').toLocaleLowerCase().includes(query);
   }).sort((a, b) => {
     const index = provider => order.includes(provider) ? order.indexOf(provider) : order.length;
-    return index(a.provider) - index(b.provider) || (index(a.provider) === order.length ? a.provider.localeCompare(b.provider) : 0) || priority[knownStatus(a)] - priority[knownStatus(b)] || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+    return index(a.provider) - index(b.provider) || (index(a.provider) === order.length ? a.provider.localeCompare(b.provider) : 0) || priority[agentPresentation(state, a)] - priority[agentPresentation(state, b)] || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
   });
 }
 
@@ -94,29 +102,105 @@ export function editText(value, cursor, input, key = {}, multiline = false) {
   return { value: chars.join(''), cursor };
 }
 
-export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
+export function createTuiModel({ monitor, controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, readModel, readCodexModel, readAge, now, onQuit = () => {} }) {
   let alive = true;
   let initialized = false;
+  let submitting = false;
   let catalogGeneration = 0;
+  let quitting = false;
+  let rowClick = null;
   const subscribers = new Set();
   let state = {
-    snapshot: monitor.getSnapshot(), view: 'board', selectedId: null, filter: 'all', query: '', command: '',
-    field: 'provider', cursor: { name: 0, cwd: 0, prompt: 0, search: 0, command: 0 },
-    draft: { provider: '', name: '', workspaceId: '', cwd: '', prompt: '' },
+    snapshot: monitor.getSnapshot(), modelInfoByAgent: {}, ageInfoByAgent: {}, view: 'board', boardView: 'tasks', selectedTaskId: null, selectedId: null, filter: 'all', query: '', command: '',
+    field: 'provider', cursor: { name: 0, subfolder: 0, prompt: 0, search: 0, command: 0, projectQuery: 0, folderPath: 0 },
+    draft: { provider: '', name: '', projectKey: '', subfolder: '', prompt: '' },
     profiles: { providers: [], workspaces: [], defaultCwd: '', defaultWorkspaceId: '' },
     profilesLoading: true, profilesError: null, busy: null, notice: null,
-    confirmation: null, confirmClose: false, dispatchHold: false, resultTarget: null,
+    confirmation: null, confirmClose: false, resultTarget: null,
+    followUp: { target: null, text: '', cursor: 0, drafts: {}, returnView: 'board' },
+    rename: { target: null, text: '', cursor: 0, error: null, returnView: 'board' },
+    tasks: [], projects: [], trustRequired: [], projectsLoading: true, projectsError: null, projectWarnings: [],
+    decision: null, requiredNotice: null, detailOffset: 0, projectQuery: '', pickerIndex: 0, folderPath: '', folderLoading: false,
+    suggestions: [], suggestionIndex: 0, suggestionArrowMoved: false, recall: [], recallIndex: null, recallDraft: '',
   };
   function change(patch) {
     if (!alive) return;
     state = { ...state, ...patch };
     const matches = visibleAgents(state);
     if (!matches.some(agent => agent.id === state.selectedId)) state = { ...state, selectedId: matches[0]?.id || null };
+    const rows = taskRows(state);
+    if (!rows.some(row => row.id === state.selectedTaskId)) state = { ...state, selectedTaskId: rows[0]?.id || null };
     for (const subscriber of subscribers) subscriber();
   }
   change({});
-  const unsubscribe = monitor.subscribe(snapshot => change({ snapshot }));
-  const selected = () => state.snapshot.agents.find(agent => agent.id === state.selectedId);
+  const session = createTaskSession({ controller, registry, getConfig, reloadConfig, addTrustedRepo, summarize, acknowledgeNotice, now, read: () => state, change, inform });
+  async function refreshModels(snapshot) {
+    readCodexModel?.retain?.(snapshot.agents.filter(agent => agent.provider === 'codex').map(agent => agent.terminalId));
+    if ((!readModel && !readCodexModel) || snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
+    await Promise.all(snapshot.agents.map(async agent => {
+      const codex = agent.provider === 'codex';
+      const sessionId = trustedSession(agent.provider, agent.sessionId);
+      if (codex ? !readCodexModel || !agent.paneId || !agent.terminalId : !readModel || !sessionId) return;
+      let info;
+      try { info = await (codex ? readCodexModel({ paneId: agent.paneId, terminalId: agent.terminalId }) : readModel({ provider: agent.provider, sessionId })); }
+      catch { /* Optional local metadata never blocks the board. */ }
+      if (!alive) return;
+      if (codex && (state.snapshot.mode === 'demo' || state.snapshot.source.state !== 'connected')) return;
+      const current = state.snapshot.agents.find(item => item.id === agent.id);
+      if (!current || current.provider !== agent.provider || !codex && trustedSession(current.provider, current.sessionId) !== sessionId
+        || current.paneId !== agent.paneId || current.terminalId !== agent.terminalId) return;
+      const previous = state.modelInfoByAgent[agent.id];
+      if (previous?.model === info?.model && previous?.effort === info?.effort) return;
+      const modelInfoByAgent = { ...state.modelInfoByAgent };
+      if (info?.model || info?.effort) modelInfoByAgent[agent.id] = { ...(info.model ? { model: info.model } : {}), ...(info.effort ? { effort: info.effort } : {}) };
+      else delete modelInfoByAgent[agent.id];
+      change({ modelInfoByAgent });
+    }));
+  }
+  async function refreshAges(snapshot) {
+    if (!readAge) return;
+    readAge.retain?.(snapshot.agents.map(agent => agent.terminalId));
+    if (snapshot.mode === 'demo' || snapshot.source.state !== 'connected') return;
+    await Promise.all(snapshot.agents.map(async agent => {
+      if (!agent.paneId || !agent.terminalId) return;
+      let info;
+      try { info = await readAge({ paneId: agent.paneId, terminalId: agent.terminalId }); }
+      catch { /* Missing process metadata leaves an empty terminal cell. */ }
+      if (!alive || state.snapshot.mode === 'demo' || state.snapshot.source.state !== 'connected') return;
+      const current = state.snapshot.agents.find(item => item.id === agent.id);
+      if (!current || current.provider !== agent.provider || current.paneId !== agent.paneId || current.terminalId !== agent.terminalId) return;
+      const valid = Number.isSafeInteger(info?.pid) && info.pid > 0 && Number.isFinite(info?.startedAt);
+      const previous = state.ageInfoByAgent[agent.id];
+      if (previous?.pid === (valid ? info.pid : undefined) && previous?.startedAt === (valid ? info.startedAt : undefined)) return;
+      const ageInfoByAgent = { ...state.ageInfoByAgent };
+      if (valid) ageInfoByAgent[agent.id] = { pid: info.pid, startedAt: info.startedAt };
+      else delete ageInfoByAgent[agent.id];
+      change({ ageInfoByAgent });
+    }));
+  }
+  const unsubscribe = monitor.subscribe(snapshot => {
+    // Keep fields local to this terminal. The monitor and control identities
+    // remain the unchanged Herdr snapshot shared with the browser.
+    const modelInfoByAgent = Object.fromEntries(Object.entries(state.modelInfoByAgent).filter(([id]) => {
+      const before = state.snapshot.agents.find(agent => agent.id === id), after = snapshot.agents.find(agent => agent.id === id);
+      return snapshot.mode !== 'demo' && before && after && before.provider === after.provider
+        && (after.provider === 'codex' ? Boolean(readCodexModel) : trustedSession(after.provider, after.sessionId)
+          && trustedSession(before.provider, before.sessionId) === trustedSession(after.provider, after.sessionId))
+        && before.paneId === after.paneId && before.terminalId === after.terminalId;
+    }));
+    const ageInfoByAgent = Object.fromEntries(Object.entries(state.ageInfoByAgent).filter(([id]) => {
+      const before = state.snapshot.agents.find(agent => agent.id === id), after = snapshot.agents.find(agent => agent.id === id);
+      return snapshot.mode !== 'demo' && before && after
+        && before.provider === after.provider && before.terminalId === after.terminalId && before.paneId === after.paneId;
+    }));
+    change({ snapshot, modelInfoByAgent, ageInfoByAgent }); session.observe(snapshot); void refreshModels(snapshot); void refreshAges(snapshot);
+  });
+  const selected = () => state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.agent : state.snapshot.agents.find(agent => agent.id === state.selectedId);
+  function quit() {
+    if (quitting) return;
+    quitting = true;
+    onQuit();
+  }
   function targetBlock(target, closing = false) {
     const blocked = controlBlock(state);
     if (blocked) return blocked;
@@ -138,14 +222,15 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       const patch = { profiles, profilesLoading: false };
       if (!initialized) {
         initialized = true;
-        patch.draft = { ...state.draft, provider: profiles.providers.find(provider => provider.id === 'codex' && provider.available)?.id || profiles.providers.find(provider => provider.available)?.id || profiles.providers[0]?.id || '', workspaceId: profiles.defaultWorkspaceId || profiles.workspaces[0]?.id || '', cwd: profiles.defaultCwd || '' };
-        patch.cursor = { ...state.cursor, cwd: graphemes(patch.draft.cwd).length };
+        patch.draft = { ...state.draft, provider: profiles.providers.find(provider => provider.id === 'codex' && provider.available)?.id || profiles.providers.find(provider => provider.available)?.id || profiles.providers[0]?.id || '' };
+
       }
       change(patch);
+      session.initializeProject();
     } catch (error) { if (generation === catalogGeneration) change({ profilesLoading: false, profilesError: safeText(error.message || 'Unable to read launch settings.') }); }
   }
   async function run(kind, target, partial = false) {
-    const blocked = partial ? controlBlock(state) || (target?.paneId === state.profiles.ownPaneId ? 'Shep cannot focus its own pane.' : null) : targetBlock(target, kind === 'closeAgent');
+    const blocked = partial ? controlBlock(state) || (target?.paneId === state.profiles.ownPaneId || target?.terminalId && target.terminalId === state.profiles.ownTerminalId ? 'Shep cannot focus its own pane.' : null) : targetBlock(target, kind === 'closeAgent');
     if (blocked) { inform(blocked, 'warning'); return; }
     change({ busy: kind, notice: { message: kind === 'focus' ? 'Focusing agent…' : 'Closing agent…', kind: 'info' } });
     try {
@@ -153,82 +238,240 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       change({ busy: null, notice: { message: safeText(outcome.message), kind: outcome.ok ? 'success' : 'warning' }, ...(kind === 'closeAgent' && outcome.ok ? { view: 'board', confirmation: null } : {}) });
     } catch (error) { change({ busy: null, notice: { message: safeText(error.message || 'The action failed. Check Herdr before retrying.'), kind: 'warning' } }); }
   }
-  async function dispatch() {
+  async function dispatch(source = 'compose') {
+    if (submitting) return;
     const blocked = controlBlock(state);
     if (blocked) { inform(blocked, 'warning'); return; }
-    if (state.dispatchHold) { inform('Review the previous launch, then use “Allow another launch” before dispatching again.', 'warning'); return; }
-    const provider = state.profiles.providers.find(item => item.id === state.draft.provider);
-    if (state.profilesLoading || state.profilesError) { inform('Wait for launch settings or refresh them with Ctrl+R.', 'warning'); return; }
-    if (!provider?.available) { inform(provider?.reason || 'This provider executable is unavailable.', 'warning'); return; }
-    if (!state.draft.prompt.trim()) { change({ field: 'prompt' }); inform('Add a prompt before dispatching.', 'warning'); return; }
-    if (Buffer.byteLength(state.draft.prompt, 'utf8') > 65536) { change({ field: 'prompt' }); inform('The prompt exceeds 65536 UTF-8 bytes. Shorten it before dispatching.', 'warning'); return; }
-    if (state.draft.name.trim() && !/^[a-z][a-z0-9_-]{0,31}$/.test(state.draft.name.trim())) { change({ field: 'name' }); inform('Names start with a-z and use a-z, 0-9, _ or -; maximum 32 characters.', 'warning'); return; }
-    if (!state.draft.cwd.trim()) { change({ field: 'cwd' }); inform('Choose a working directory.', 'warning'); return; }
-    const draft = { ...state.draft };
-    change({ busy: 'dispatch', notice: { message: 'Starting a native Herdr agent…', kind: 'info' } });
+    if (state.profilesLoading || state.profilesError) { inform('Launch settings are unavailable. Use Ctrl+R to refresh them.', 'warning'); return; }
+    submitting = true;
+    try { await session.submit(source); }
+    finally { submitting = false; }
+  }
+  const followUpKey = target => JSON.stringify([target.paneId, target.terminalId, target.provider, target.agentName ?? null, trustedSession(target.provider, target.sessionId) ?? null]);
+  function followUpBlock(target) {
+    const blocked = targetBlock(target);
+    if (blocked) return blocked;
+    if (!target.paneId || !target.terminalId) return 'Select an agent with a confirmed pane and terminal identity.';
+    const current = state.snapshot.agents.find(agent => agent.id === target.id);
+    if (target.agentName != null && current.agentName !== target.agentName || !sessionMatches(target.provider, target.sessionId, current.sessionId, true)) return 'This agent is no longer available. Select it again from the live list.';
+    return null;
+  }
+  function openFollowUp() {
+    const target = selected(), blocked = followUpBlock(target);
+    if (blocked) { inform(blocked, 'warning'); return; }
+    const text = state.followUp.drafts[followUpKey(target)] || '';
+    change({ view: 'follow-up', followUp: { ...state.followUp, target: structuredClone(target), text, cursor: graphemes(text).length, returnView: state.view === 'detail' ? 'detail' : 'board' } });
+  }
+  async function sendFollowUp() {
+    const { target, text, returnView } = state.followUp;
+    const blocked = followUpBlock(target);
+    if (blocked) { inform(blocked, 'warning'); return; }
+    if (validatePrompt(text).length) { inform('Enter a nonempty prompt no larger than 64 KiB. Newlines and tabs are allowed; terminal control characters are not.', 'warning'); return; }
+    change({ busy: 'follow-up' });
+    const uncertain = 'Follow-up delivery could not be confirmed. Inspect the agent before sending it again.';
     try {
-      const result = await controller.dispatch({ provider: draft.provider, prompt: draft.prompt, cwd: draft.cwd, ...(draft.name.trim() ? { name: draft.name.trim() } : {}), ...(draft.workspaceId ? { workspaceId: draft.workspaceId } : {}) });
-      const successful = result.ok && result.state === 'submitted';
-      const hold = !successful && (result.state === 'uncertain' || result.state === 'needs_input' || Boolean(result.paneId));
-      const target = result.paneId ? { ...result, id: result.terminalId || result.paneId, paneId: result.paneId, terminalId: result.terminalId, provider: draft.provider, name: result.agentName || draft.name || provider.name, status: 'unknown', workspace: { id: draft.workspaceId, path: draft.cwd } } : null;
-      change({ busy: null, notice: { message: safeText(`${result.message}${result.paneId ? ` Pane: ${result.paneId}.` : ''}`), kind: successful ? 'success' : 'warning' }, dispatchHold: hold, resultTarget: target,
-        ...(successful ? { view: 'board', command: '', draft: { ...draft, name: '', prompt: '' }, cursor: { ...state.cursor, name: 0, prompt: 0, command: 0 } } : {}) });
-    } catch (error) {
-      change({ busy: null, dispatchHold: true, notice: { message: safeText(`${error.message || 'Launch outcome unavailable.'} Check Herdr before another launch; your prompt is preserved.`), kind: 'warning' } });
+      const outcome = await controller.followUp({ target: structuredClone(target), text });
+      if (!alive) return;
+      session.recordFollowUp(target, outcome);
+      const submitted = outcome.state === 'submitted';
+      const message = submitted ? 'Follow-up submitted' : outcome.state === 'needs_input' ? 'The agent is waiting for input in its pane. Answer it there.' : outcome.state === 'uncertain' ? uncertain : outcome.message;
+      change({ busy: null, ...(submitted || outcome.state === 'uncertain' ? { view: returnView } : {}),
+        ...(submitted ? { followUp: { ...state.followUp, text: '', cursor: 0, drafts: { ...state.followUp.drafts, [followUpKey(target)]: '' } } } : {}) });
+      inform(message, submitted ? 'success' : 'warning');
+    } catch {
+      change({ busy: null, view: returnView }); inform(uncertain, 'warning');
     }
   }
-  function submitCommand() {
-    if (controlBlock(state)) { inform(controlBlock(state), 'warning'); return; }
-    if (state.profilesLoading || state.profilesError) { inform('Launch settings are unavailable. Use Ctrl+R to refresh them.', 'warning'); return; }
+  const managedName = agent => (Object.hasOwn(agent, 'agentName') ? agent.agentName : agent.name) || null;
+  function renameBlock(target) {
+    const blocked = targetBlock(target);
+    if (blocked) return blocked;
+    if (!target.paneId || !target.terminalId || !target.provider) return 'Select an agent with a confirmed pane, terminal and provider identity.';
+    const current = state.snapshot.agents.find(agent => agent.id === target.id);
+    if (managedName(current) !== managedName(target) || !sessionMatches(target.provider, target.sessionId, current.sessionId, true)) return 'This agent is no longer available. Select it again from the live list.';
+    const task = state.tasks.find(task => !task.dismissed && matchesTask(task, target));
+    if (current.launchPending === true || task && ['queued', 'starting'].includes(task.launch.state)) return 'Wait until the agent finishes starting before renaming it.';
+    return null;
+  }
+  function openRename() {
+    const target = selected(), blocked = renameBlock(target);
+    if (blocked) { inform(blocked, 'warning'); return; }
+    const text = managedName(target) || '';
+    change({ view: 'rename', rename: { target: structuredClone(target), text, cursor: graphemes(text).length, error: null, returnView: state.view === 'detail' ? 'detail' : 'board' } });
+  }
+  async function sendRename() {
+    const { target, text: name, returnView } = state.rename;
+    const blocked = renameBlock(target);
+    const error = blocked || (!PATTERNS.agentName.test(name) ? 'Use 1–32 lowercase letters, digits, underscores or hyphens, starting with a letter.' : null);
+    if (error) { change({ rename: { ...state.rename, error } }); return; }
+    change({ busy: 'rename', rename: { ...state.rename, error: null } });
+    const uncertain = 'Rename could not be confirmed. Check the pane; Shep will not repeat it automatically.';
     try {
-      const parsed = parseDispatch(state.command, state.profiles.providers);
-      const provider = state.profiles.providers.find(item => item.id === parsed.provider);
-      if (!provider?.available) { inform(`${provider?.name || parsed.provider}: ${provider?.reason || 'This provider executable is unavailable.'}`, 'warning'); return; }
-      change({ draft: { ...state.draft, provider: parsed.provider, name: '', prompt: parsed.prompt }, cursor: { ...state.cursor, prompt: graphemes(parsed.prompt).length } });
-      void dispatch();
-    } catch (error) { inform(error.message, 'warning'); }
+      const outcome = await controller.rename({ target: structuredClone(target), name });
+      if (!alive) return;
+      const confirmed = outcome.ok && outcome.state === 'submitted' && outcome.agentName === name
+        && outcome.paneId === target.paneId && outcome.terminalId === target.terminalId;
+      if (confirmed) {
+        const tasks = state.tasks.map(task => !task.dismissed && matchesTask(task, target)
+          ? { ...task, name, target: { ...task.target, agentName: name } } : task);
+        const snapshot = { ...state.snapshot, agents: state.snapshot.agents.map(agent => agent.id === target.id
+          && agent.paneId === target.paneId && agent.terminalId === target.terminalId && agent.provider === target.provider
+          ? { ...agent, name, agentName: name } : agent) };
+        change({ busy: null, tasks, snapshot, view: returnView });
+        inform('Agent renamed.', 'success');
+      } else if (outcome.state === 'uncertain' || outcome.ok) {
+        change({ busy: null, view: returnView }); inform(uncertain, 'warning');
+      } else change({ busy: null, rename: { ...state.rename, error: safeText(outcome.message) } });
+    } catch {
+      if (alive) { change({ busy: null, view: returnView }); inform(uncertain, 'warning'); }
+    }
+  }
+  const submitCommand = () => { void dispatch('command'); };
+  function updateSuggestions() {
+    const cursor = graphemes(state.command).slice(0, state.cursor.command).join('').length;
+    change({ suggestions: commandSuggestions(state.command, cursor, session.context()), suggestionIndex: 0, suggestionArrowMoved: false });
+  }
+  function acceptSuggestion(index = state.suggestionIndex) {
+    const suggestion = state.suggestions[index];
+    if (!suggestion) return;
+    const command = state.command.slice(0, suggestion.replaceStart) + suggestion.value + state.command.slice(suggestion.replaceEnd);
+    const cursor = graphemes(command.slice(0, suggestion.replaceStart + suggestion.value.length)).length;
+    change({ command, cursor: { ...state.cursor, command: cursor }, recallIndex: null });
+    updateSuggestions();
+  }
+  function recall(direction) {
+    if (state.command.includes('\n') || !state.recall.length) return false;
+    const index = state.recallIndex === null ? state.recall.length : state.recallIndex;
+    const next = Math.max(0, Math.min(state.recall.length, index + direction));
+    const recallDraft = state.recallIndex === null ? state.command : state.recallDraft;
+    const command = next === state.recall.length ? recallDraft : state.recall[next];
+    change({ command, recallDraft, recallIndex: next, cursor: { ...state.cursor, command: graphemes(command).length } });
+    updateSuggestions(); return true;
+  }
+  function pickerItems() {
+    const query = state.projectQuery.toLocaleLowerCase().trim();
+    const all = [...state.projects, ...state.trustRequired];
+    const ranked = registry?.search?.(query) || all;
+    const projects = [...ranked, ...all.filter(project => query && project.root.toLocaleLowerCase().includes(query) && !ranked.some(item => (item.key || item.root) === (project.key || project.root)))];
+    return [...projects, { other: true, name: 'Other folder…', root: 'Use a folder for this session' }];
+  }
+  function chooseProject(index = state.pickerIndex) {
+    const project = pickerItems()[index];
+    if (!project) return;
+    if (project.other) { change({ view: 'folder', cursor: { ...state.cursor, folderPath: graphemes(state.folderPath).length } }); return; }
+    change({ view: 'compose', field: 'subfolder', draft: { ...state.draft, projectKey: project.key || project.root, subfolder: '' } });
   }
   function edit(input, key = {}, paste = false) {
-    const field = state.view === 'search' ? 'search' : state.view === 'command' ? 'command' : state.field;
-    if (!['name', 'cwd', 'prompt', 'search', 'command'].includes(field)) return;
-    const value = field === 'search' ? state.query : field === 'command' ? state.command : state.draft[field];
+    if (state.view === 'rename') {
+      const edited = editText(state.rename.text, state.rename.cursor, input, paste ? {} : key, false);
+      if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) return;
+      change({ rename: { ...state.rename, text: edited.value, cursor: edited.cursor, error: null } });
+      return;
+    }
+    if (state.view === 'follow-up') {
+      const edited = editText(state.followUp.text, state.followUp.cursor, input, paste ? {} : key, true);
+      if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) { inform('This draft exceeds 256 KiB. Paste a smaller prompt.', 'warning'); return; }
+      change({ followUp: { ...state.followUp, text: edited.value, cursor: edited.cursor,
+        drafts: { ...state.followUp.drafts, [followUpKey(state.followUp.target)]: edited.value } } });
+      return;
+    }
+    const field = state.view === 'search' ? 'search' : state.view === 'command' ? 'command' : state.view === 'picker' ? 'projectQuery' : state.view === 'folder' ? 'folderPath' : state.field;
+    if (!['name', 'subfolder', 'prompt', 'search', 'command', 'projectQuery', 'folderPath'].includes(field)) return;
+    const top = ['command', 'projectQuery', 'folderPath'].includes(field);
+    const value = field === 'search' ? state.query : top ? state[field] : state.draft[field];
     const edited = editText(value, state.cursor[field], input, paste ? {} : key, field === 'prompt' || field === 'command');
     if (Buffer.byteLength(edited.value, 'utf8') > 256 * 1024) { inform('This draft exceeds 256 KiB. Paste a smaller prompt.', 'warning'); return; }
-    change({ cursor: { ...state.cursor, [field]: edited.cursor }, ...(field === 'search' ? { query: edited.value } : field === 'command' ? { command: edited.value } : { draft: { ...state.draft, [field]: edited.value } }) });
+    change({ recallIndex: null, cursor: { ...state.cursor, [field]: edited.cursor }, ...(field === 'search' ? { query: edited.value } : top ? { [field]: edited.value, ...(field === 'projectQuery' ? { pickerIndex: 0 } : {}) } : { draft: { ...state.draft, [field]: edited.value } }) });
+    if (field === 'command') updateSuggestions();
   }
   function cycleField(direction = 1) {
     const index = FIELDS.indexOf(state.field);
     change({ field: FIELDS[(index + direction + FIELDS.length) % FIELDS.length] });
   }
   function cycleChoice(direction = 1) {
-    const list = state.field === 'provider' ? state.profiles.providers : state.profiles.workspaces;
+    const list = state.profiles.providers.filter(provider => provider.available);
     if (!list.length) return;
-    const index = list.findIndex(item => item.id === state.draft[state.field]);
-    const next = list[(index + direction + list.length) % list.length];
-    const draft = { ...state.draft, [state.field]: next.id };
-    if (state.field === 'workspaceId' && next.path) draft.cwd = next.path;
-    change({ draft, cursor: { ...state.cursor, cwd: graphemes(draft.cwd).length } });
+    const index = list.findIndex(item => item.id === state.draft.provider);
+    change({ draft: { ...state.draft, provider: list[(index + direction + list.length) % list.length].id } });
   }
   function moveSelection(direction) {
-    const agents = visibleAgents(state);
-    if (!agents.length) return;
-    const index = agents.findIndex(agent => agent.id === state.selectedId);
-    change({ selectedId: agents[Math.max(0, Math.min(agents.length - 1, index + direction))].id });
+    const rows = state.boardView === 'tasks' ? taskRows(state) : visibleAgents(state);
+    if (!rows.length) return;
+    const field = state.boardView === 'tasks' ? 'selectedTaskId' : 'selectedId';
+    const index = rows.findIndex(row => row.id === state[field]);
+    change({ [field]: rows[Math.max(0, Math.min(rows.length - 1, index + direction))].id, detailOffset: 0 });
   }
   function action(name, value) {
-    if (name === 'quit') { onQuit(); return; }
+    const clickingRow = name === 'click-agent' || name === 'click-task';
+    if (!clickingRow) rowClick = null;
+    if (name === 'cancel-row-click') return;
+    if (name === 'quit') { void quit(); return; }
+    if (state.busy || state.requiredNotice) { rowClick = null; return; }
+    if (clickingRow) {
+      if (!['board', 'search', 'detail'].includes(state.view)) { rowClick = null; return; }
+      const task = name === 'click-task';
+      const row = (task ? taskRows(state) : visibleAgents(state)).find(item => item.id === value);
+      if (!row) { rowClick = null; return; }
+      const agent = task ? row.agent : row;
+      const identity = JSON.stringify([name, value, agent?.provider, agent?.paneId, agent?.terminalId, trustedSession(agent?.provider, agent?.sessionId)]);
+      const at = new Date(now?.() ?? Date.now()).getTime();
+      const double = rowClick?.identity === identity && at >= rowClick.at && at - rowClick.at <= 400;
+      rowClick = null;
+      action(task ? 'select-task' : 'select', value);
+      if (double) action('focus');
+      else rowClick = { identity, at };
+      return;
+    }
+    if (state.view === 'rename') {
+      if (name === 'rename-send') void sendRename();
+      else if (name === 'cancel') change({ view: state.rename.returnView });
+      return;
+    }
+    if (state.view === 'follow-up') {
+      if (name === 'follow-up-send') void sendFollowUp();
+      else if (name === 'cancel') change({ view: state.followUp.returnView });
+      return;
+    }
+    if (['board', 'detail'].includes(state.view)) {
+      if (name === 'rename') { openRename(); return; }
+      if (name === 'follow-up') { openFollowUp(); return; }
+      if (name === 'clear' || name === 'clear-closed') { void session.dismiss(state.boardView === 'tasks' ? state.selectedTaskId : null, name === 'clear-closed'); return; }
+    }
+    if (state.view === 'decision') {
+      if (name === 'decide') { if (value && controlBlock(state)) inform(controlBlock(state), 'warning'); else void session.decide(Boolean(value)); }
+      else if (name === 'cancel') void session.decide(false);
+      else if (name === 'decision-scroll') change({ decision: { ...state.decision, offset: Math.max(0, state.decision.offset + value) } });
+      else if (name === 'decision-position') change({ decision: { ...state.decision, offset: value } });
+      return;
+    }
+    if (name === 'board-toggle') { if (['board', 'search', 'detail'].includes(state.view)) change({ boardView: state.boardView === 'tasks' ? 'agents' : 'tasks', detailOffset: 0 }); return; }
+    if (name === 'select-task') { if (['board', 'search', 'detail'].includes(state.view)) change({ selectedTaskId: value, detailOffset: 0 }); return; }
+    if (name === 'details') { if (['board', 'search'].includes(state.view)) { change({ view: 'detail', detailOffset: 0 }); if (state.boardView === 'tasks') session.inspect(state.selectedTaskId); } return; }
+    if (name === 'notice-open') { if (state.notice) change({ view: 'notice', noticeDetail: { ...state.notice }, detailOffset: 0 }); return; }
+    if (name === 'detail-scroll') { if (['board', 'detail', 'notice'].includes(state.view)) change({ detailOffset: Math.max(0, state.detailOffset + value) }); return; }
+    if (name === 'detail-position') { change({ detailOffset: value }); return; }
+    if (name === 'suggest-next') { if (state.view === 'command') change({ suggestionIndex: (state.suggestionIndex + 1) % Math.max(1, state.suggestions.length) }); return; }
+    if (name === 'command-recall') { if (state.view === 'command') recall(value); return; }
+    if (name === 'suggestion') { if (state.view === 'command') acceptSuggestion(value); return; }
+    if (name === 'pick-project') { change({ view: 'picker', projectQuery: '', pickerIndex: 0, cursor: { ...state.cursor, projectQuery: 0 } }); return; }
+    if (name === 'pick') { if (state.view === 'picker') chooseProject(value); return; }
+    if (name === 'picker-move') { if (state.view === 'picker') change({ pickerIndex: Math.max(0, Math.min(pickerItems().length - 1, state.pickerIndex + value)) }); return; }
+    if (name === 'folder-submit') { if (!state.folderLoading && !controlBlock(state)) void session.otherFolder(state.folderPath); return; }
+    if (name === 'field-next') { if (state.view === 'compose') cycleField(value); return; }
     if (state.view === 'command' && ['select', 'focus', 'close', 'new', 'search', 'filter'].includes(name)) return;
-    if (name === 'command') { const command = state.command || '/dispatch '; change({ view: 'command', command, cursor: { ...state.cursor, command: graphemes(command).length } }); return; }
-    if (name === 'select') { if (state.view === 'board' || state.view === 'search') change({ selectedId: value }); return; }
-    if (name === 'field') { if (state.view === 'compose') { if (state.field === value && ['provider', 'workspaceId'].includes(value)) cycleChoice(1); else change({ field: value }); } return; }
-    if (name === 'refresh') { void monitor.refresh(); if (state.view === 'compose' || state.view === 'command') void refreshProfiles(); return; }
+    if (name === 'command') { const command = state.command || '/dispatch '; change({ view: 'command', command, cursor: { ...state.cursor, command: graphemes(command).length } }); updateSuggestions(); return; }
+    if (name === 'select') { if (['board', 'search', 'detail'].includes(state.view)) change({ selectedId: value, selectedTaskId: taskRows(state).find(row => row.agent?.id === value)?.id || state.selectedTaskId, detailOffset: 0 }); return; }
+    if (name === 'field') { if (state.view === 'compose') { if (value === 'projectKey') action('pick-project'); else if (state.field === value && value === 'provider') cycleChoice(1); else change({ field: value }); } return; }
+    if (name === 'refresh') { void monitor.refresh?.(); void refreshProfiles(); void session.refresh({ force: true }); return; }
     if (name === 'search') { change({ view: 'search', cursor: { ...state.cursor, search: graphemes(state.query).length } }); return; }
-    if (name === 'filter') { const filters = ['all', ...Object.keys(STATUS_LABELS)]; change({ filter: filters[(filters.indexOf(state.filter) + 1) % filters.length] }); return; }
+    if (name === 'filter') {
+      const filters = state.boardView === 'tasks' ? TASK_FILTERS : TASK_FILTERS.filter(filter => filter === 'all' || Object.hasOwn(STATUS_LABELS, filter));
+      change({ filter: filters[(filters.indexOf(state.filter) + 1) % filters.length] }); return;
+    }
     if (name === 'new') { change({ view: 'compose', field: state.draft.prompt ? 'prompt' : 'provider', confirmation: null }); return; }
-    if (name === 'cancel') { if (!state.busy) change({ view: 'board', confirmation: null }); return; }
+    if (name === 'cancel') { if (!state.busy) change({ view: ['picker', 'folder'].includes(state.view) ? 'compose' : 'board', confirmation: null }); return; }
     if (name === 'move') { moveSelection(value); return; }
     if (name === 'choice') { cycleChoice(value); return; }
-    if (name === 'allow-launch') { if (!state.busy) change({ dispatchHold: false, resultTarget: null, notice: { kind: 'warning', message: 'Another launch is enabled. The preserved prompt will create a new agent.' } }); return; }
     if (name === 'focus-result') {
       const target = state.snapshot.agents.find(agent => agent.paneId === state.resultTarget?.paneId && (!state.resultTarget.terminalId || agent.terminalId === state.resultTarget.terminalId));
       if (target) void run('focus', target);
@@ -237,7 +480,16 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       return;
     }
     if (name === 'dispatch') { void dispatch(); return; }
-    if (name === 'focus') { const target = selected(); void run('focus', target); return; }
+    if (name === 'focus') {
+      const target = selected();
+      const task = state.boardView === 'tasks' ? taskRows(state).find(row => row.id === state.selectedTaskId)?.task : null;
+      if (task && session.review(task.id)) return;
+      // The controller may know the newly created native target before the
+      // public monitor does. It still validates the exact captured identity.
+      if (!target && task?.target && task.live.status !== 'closed') void run('focus', { ...task.target, id: task.target.terminalId, name: task.name }, true);
+      else void run('focus', target);
+      return;
+    }
     if (name === 'close') {
       const target = selected();
       const blocked = targetBlock(target);
@@ -248,6 +500,7 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
     if (name === 'confirm-close') { void run('closeAgent', state.confirmation); return; }
   }
   function key(input, key = {}) {
+    rowClick = null;
     if (key.eventType === 'release') return;
     // Ink can deliver typed text and a following Enter/Tab in the same chunk.
     // Bracketed paste has its own channel and never enters this branch.
@@ -263,11 +516,50 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
     if (key.ctrl && (input === 'c' || input === 'd')) { action('quit'); return; }
     if (state.busy) return;
     if (key.ctrl && input === 'r') { action('refresh'); return; }
-    if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'y' && state.dispatchHold) { action('allow-launch'); return; }
+    if (state.view === 'rename') {
+      if (key.escape) action('cancel');
+      else if (key.return) action('rename-send');
+      else edit(input, key);
+      return;
+    }
+    if (state.view === 'follow-up') {
+      if (key.escape) action('cancel');
+      else if (key.ctrl && input === 's') action('follow-up-send');
+      else edit(input, key);
+      return;
+    }
     if (['command', 'compose'].includes(state.view) && key.ctrl && input === 'f' && state.resultTarget) { action('focus-result'); return; }
+    if (state.view === 'decision') {
+      if (key.escape || input === 'n') action('decide', false);
+      else if (key.tab || key.leftArrow || key.rightArrow) change({ decision: { ...state.decision, confirm: !state.decision.confirm } });
+      else if (input === 'y') action('decide', true);
+      else if (key.return) action('decide', state.decision.confirm);
+      else if (key.downArrow || key.pageDown) action('decision-scroll', 1);
+      else if (key.upArrow || key.pageUp) action('decision-scroll', -1);
+      return;
+    }
+    if (state.view === 'picker') {
+      if (key.escape) action('cancel');
+      else if (key.return) chooseProject();
+      else if (key.downArrow || key.upArrow || key.tab) change({ pickerIndex: Math.max(0, Math.min(pickerItems().length - 1, state.pickerIndex + (key.upArrow || key.shift ? -1 : 1))) });
+      else edit(input, key);
+      return;
+    }
+    if (state.view === 'folder') {
+      if (key.escape) action('cancel');
+      else if (key.return) action('folder-submit');
+      else if (!state.folderLoading) edit(input, key);
+      return;
+    }
     if (state.view === 'command') {
-      if (key.escape) change({ view: 'board' });
-      else if (key.return) submitCommand();
+      if (key.escape && state.recallIndex !== null) { change({ command: state.recallDraft, recallIndex: null, cursor: { ...state.cursor, command: graphemes(state.recallDraft).length } }); updateSuggestions(); }
+      else if (key.escape) change({ view: 'board' });
+      else if (key.tab) { if (key.shift) change({ suggestionIndex: (state.suggestionIndex + 1) % Math.max(1, state.suggestions.length) }); else acceptSuggestion(); }
+      else if ((key.upArrow || key.downArrow) && state.suggestions.length) {
+        change({ suggestionIndex: (state.suggestionIndex + (key.upArrow ? -1 : 1) + state.suggestions.length) % state.suggestions.length, suggestionArrowMoved: true });
+      }
+      else if ((key.upArrow || key.downArrow) && recall(key.upArrow ? -1 : 1)) return;
+      else if (key.return) { if (state.suggestionArrowMoved && state.suggestions.length) acceptSuggestion(); else submitCommand(); }
       else edit(input, key);
       return;
     }
@@ -282,13 +574,13 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       if (key.escape) { action('cancel'); return; }
       if (key.ctrl && input === 's') { action('dispatch'); return; }
       if (key.tab) { cycleField(key.shift ? -1 : 1); return; }
-      if (['provider', 'workspaceId'].includes(state.field)) {
+      if (state.field === 'projectKey') { action('pick-project'); if (input && !key.return) edit(input, key); }
+      else if (state.field === 'provider') {
         if (key.leftArrow || key.upArrow) cycleChoice(-1);
         else if (key.rightArrow || key.downArrow || input === ' ') cycleChoice(1);
         else if (key.return) cycleField();
       } else if (state.field === 'dispatch') {
         if (key.return || input === ' ') action('dispatch');
-        else if (input === 'a' && state.dispatchHold) action('allow-launch');
         else if (input === 'f' && state.resultTarget) action('focus-result');
       } else if (key.return && state.field !== 'prompt') cycleField();
       else edit(input, key);
@@ -300,29 +592,62 @@ export function createTuiModel({ monitor, controller, onQuit = () => {} }) {
       else edit(input, key);
       return;
     }
+    if (state.view === 'detail' || state.view === 'notice') {
+      if (key.escape || key.leftArrow) action('cancel');
+      else if (key.downArrow || input === 'j' || key.pageDown) action('detail-scroll', 1);
+      else if (key.upArrow || input === 'k' || key.pageUp) action('detail-scroll', -1);
+      else if (key.return && state.view === 'detail') action('focus');
+      else if (input === 'x' && state.view === 'detail') action('close');
+      else if (input === 'p' && state.view === 'detail') action('follow-up');
+      else if (input === 'e' && state.view === 'detail') action('rename');
+      else if (input === 'c' && state.view === 'detail') action('clear');
+      else if (input === 'C' && state.view === 'detail') action('clear-closed');
+      else if (input === 'q') action('quit');
+      return;
+    }
     if (input === 'q') action('quit');
+    else if (input === 'g') action('board-toggle');
+    else if (input === 'i') action('notice-open');
+    else if (key.rightArrow || input === 'd') action('details');
     else if (input === 'n') action('new');
-    else if (input.startsWith('/') && !key.ctrl && !key.meta) { change({ view: 'command', command: input, cursor: { ...state.cursor, command: graphemes(input).length } }); }
-    else if (input === 's') action('search');
+    else if (input.startsWith('/') && !key.ctrl && !key.meta) { change({ view: 'command', command: input, cursor: { ...state.cursor, command: graphemes(input).length } }); updateSuggestions(); }
+    else if (input === 's' && !key.ctrl) action('search');
     else if (input === 'f') action('filter');
     else if (input === 'r') action('refresh');
     else if (input === 'x') action('close');
+    else if (input === 'p') action('follow-up');
+    else if (input === 'e') action('rename');
+    else if (input === 'c') action('clear');
+    else if (input === 'C') action('clear-closed');
     else if (key.return) action('focus');
     else if (key.downArrow || input === 'j' || key.tab && !key.shift) moveSelection(1);
     else if (key.upArrow || input === 'k' || key.tab && key.shift) moveSelection(-1);
     else if (key.pageDown) moveSelection(5);
     else if (key.pageUp) moveSelection(-5);
-    else if (key.home) change({ selectedId: visibleAgents(state)[0]?.id || null });
-    else if (key.end) change({ selectedId: visibleAgents(state).at(-1)?.id || null });
+    else if (key.home) moveSelection(-Infinity);
+    else if (key.end) moveSelection(Infinity);
     else if (key.escape) change({ query: '', filter: 'all' });
   }
   const modelKey = key;
-  const ready = refreshProfiles();
+  const ready = Promise.all([refreshProfiles(), session.refresh(), refreshModels(state.snapshot), refreshAges(state.snapshot)]).then(async () => {
+    if (!alive) return;
+    // Upgrade recovery only: older Shep versions could leave an agent pane
+    // beside this one. Normal selection and shutdown never move panes.
+    if (controller?.recoverDock && state.snapshot.mode === 'live' && state.snapshot.source.state === 'connected') {
+      try {
+        const result = await controller.recoverDock();
+        if (alive && (!result.ok || result.target)) inform(result.message, result.ok ? 'success' : 'warning');
+      } catch (error) {
+        if (alive) inform(error.message || 'Leftover dock could not be restored. Inspect Herdr.', 'warning');
+      }
+    }
+  });
   return { getSnapshot: () => state, subscribe: callback => { subscribers.add(callback); return () => subscribers.delete(callback); },
     action, key, paste: text => {
+      rowClick = null;
       if (state.busy) return;
-      if (state.view === 'board' && text.startsWith('/dispatch')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
-      else if (['compose', 'search', 'command'].includes(state.view)) edit(text, {}, true);
+      if (state.view === 'board' && text.startsWith('/')) { change({ view: 'command', command: '', cursor: { ...state.cursor, command: 0 } }); edit(text, {}, true); }
+      else if (['compose', 'search', 'command', 'picker', 'folder', 'follow-up', 'rename'].includes(state.view)) edit(text, {}, true);
     }, ready,
-    selected, targetBlock, destroy: () => { alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
+    selected, targetBlock, pickerItems, getTasks: session.getTasks, showNotice: inform, destroy: () => { session.destroy(); alive = false; catalogGeneration += 1; unsubscribe(); subscribers.clear(); } };
 }

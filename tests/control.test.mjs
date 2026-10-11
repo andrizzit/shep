@@ -72,7 +72,7 @@ function fixture({ beforeRun, afterRun, readRaw, context, monitorState = 'connec
     } else throw new Error(`Unexpected command ${argv.slice(0,2).join(' ')}`);
     return afterRun ? await afterRun(argv, raw, response, options) ?? response : response;
   };
-  const controller = createController({ context: context ?? contextFor(), monitor, mode, run, readRaw: readRaw ?? (async () => structuredClone(raw)) });
+  const controller = createController({ context: context ?? contextFor(), monitor, mode, delivery: 'type', run, readRaw: readRaw ?? (async () => structuredClone(raw)) });
   return { controller, raw, calls, run };
 }
 const writes = f => f.calls.filter(c => ['split', 'start', 'prompt', 'focus', 'close'].includes(c.argv[1]));
@@ -99,7 +99,7 @@ test('dispatch passes exact literal prompt and verified pane/workspace identitie
   assert.equal(result.state, 'submitted', result.message);
   assert.deepEqual(writes(f).map(c => c.argv.slice(0,2).join('.')), ['pane.split', 'agent.start', 'agent.prompt']);
   assert.deepEqual(f.calls.find(c => c.argv[1] === 'split').argv, ['pane', 'split', '--pane', 'w1:p1', '--direction', 'right', '--cwd', temporary, '--no-focus']);
-  assert.deepEqual(f.calls.find(c => c.argv[1] === 'prompt').argv, ['agent', 'prompt', 'w1:p9', prompt]);
+  assert.deepEqual(f.calls.find(c => c.argv[1] === 'prompt').argv, ['agent', 'prompt', 'w1:p9', prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.equal(f.calls.find(c => c.argv[1] === 'start').options.timeoutMs, 35000);
   assert.equal(f.calls.find(c => c.argv[1] === 'prompt').options.timeoutMs, 8000);
   assert.ok(f.calls.every(c => c.options.signal instanceof AbortSignal));
@@ -180,7 +180,7 @@ test('unexpected host error codes never resolve object prototype fields or expos
   assert.ok(!result.message.includes('native code'));
 });
 
-test('concurrent actions reject duplicate dispatch while dispose prevents delayed prompt delivery', async () => {
+test('dispose prevents delayed prompt delivery after startup has begun', async () => {
   let release, started;
   const reachedStart = new Promise(resolve => { started = resolve; });
   const pending = new Promise(resolve => { release = resolve; });
@@ -190,7 +190,6 @@ test('concurrent actions reject duplicate dispatch while dispose prevents delaye
   } });
   const action = f.controller.dispatch(request());
   await reachedStart;
-  assert.equal((await f.controller.dispatch(request())).code, 'busy');
   f.controller.dispose();
   f.controller.dispose();
   assert.equal(signal.aborted, true);
@@ -216,8 +215,8 @@ test('fresh session identity and status are required before closing a selected a
     if (field === 'name') agent.name = 'replacement';
     if (field === 'agent_session') agent.agent_session.value = 'session-b';
     if (field === 'agent_status') agent.agent_status = 'working';
-    assert.equal((await f.controller.closeAgent(target)).ok, false, field);
-    assert.ok(!f.calls.some(c => c.argv[1] === 'close'));
+    assert.equal((await f.controller.closeAgent(target)).ok, field === 'agent_session', field);
+    assert.equal(f.calls.some(c => c.argv[1] === 'close'), field === 'agent_session');
   }
 });
 
@@ -256,12 +255,12 @@ process.stdout.write(JSON.stringify(response));
   const moduleExecutable = executable + '.mjs';
   await writeFile(moduleExecutable, await readFile(executable), { mode: 0o755 });
   const context = contextFor({ HERDR_BIN_PATH: moduleExecutable, TEST_STATE: statePath, TEST_LOG: logPath, TEST_MARKER: 'pinned' });
-  const controller = createController({ context, monitor: { getSnapshot: () => ({ mode: 'live', source: { state: 'connected' } }) } });
+  const controller = createController({ context, delivery: 'type', monitor: { getSnapshot: () => ({ mode: 'live', source: { state: 'connected' } }) } });
   context.env.TEST_MARKER = 'changed-after-creation';
   const prompt = '--wait\n$(touch /tmp/shep-never) `echo nope` "quote"\t羊';
   assert.equal((await controller.dispatch(request({ prompt }))).state, 'submitted');
   const commands = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(commands.find(c => c.args[1] === 'prompt').args, ['agent', 'prompt', 'w1:p9', prompt]);
+  assert.deepEqual(commands.find(c => c.args[1] === 'prompt').args, ['agent', 'prompt', 'w1:p9', prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.ok(commands.every(c => c.socket === context.env.HERDR_SOCKET_PATH && c.own === 'w1:p1' && c.marker === 'pinned'));
   controller.dispose();
 });

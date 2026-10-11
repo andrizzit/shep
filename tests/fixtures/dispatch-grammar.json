@@ -1,0 +1,657 @@
+{
+  "version": 1,
+  "status": "D0 provisional; error codes and parser contract await G0",
+  "context": {
+    "providers": [
+      {
+        "id": "claude",
+        "name": "Claude",
+        "available": true
+      },
+      {
+        "id": "codex",
+        "name": "Codex",
+        "available": true
+      },
+      {
+        "id": "grok",
+        "name": "Grok",
+        "available": true
+      },
+      {
+        "id": "kiro",
+        "name": "Kiro",
+        "available": true
+      }
+    ],
+    "projects": [
+      {
+        "key": "git:/fixture/shep/.git",
+        "name": "shep",
+        "aliases": [
+          "sh"
+        ],
+        "kind": "git",
+        "root": "/fixture/shep",
+        "commonDir": "/fixture/shep/.git",
+        "isolation": "auto",
+        "workspaceIds": [],
+        "sources": [
+          "config"
+        ],
+        "worktrees": []
+      },
+      {
+        "key": "git:/fixture/folio/.git",
+        "name": "folio",
+        "aliases": [],
+        "kind": "git",
+        "root": "/fixture/folio",
+        "commonDir": "/fixture/folio/.git",
+        "isolation": "auto",
+        "workspaceIds": [],
+        "sources": [
+          "config"
+        ],
+        "worktrees": []
+      },
+      {
+        "key": "dir:/fixture/notes",
+        "name": "notes",
+        "aliases": [],
+        "kind": "folder",
+        "root": "/fixture/notes",
+        "commonDir": null,
+        "isolation": "auto",
+        "workspaceIds": [],
+        "sources": [
+          "config"
+        ],
+        "worktrees": []
+      }
+    ],
+    "contextProjectKey": "git:/fixture/shep/.git",
+    "contextSubfolder": "",
+    "config": {
+      "agents": {
+        "claude": {
+          "args": [],
+          "profiles": {
+            "fast": {
+              "args": [
+                "--example-flag",
+                "value"
+              ]
+            }
+          }
+        }
+      },
+      "templates": {
+        "test": "Add unit tests for {task}. Follow this repository's existing test framework and conventions, run the relevant tests, and report what you added and the results.",
+        "fix": "Fix {task}.",
+        "review": "Review {task}."
+      }
+    },
+    "trustRequired": []
+  },
+  "cases": [
+    {
+      "id": "default",
+      "input": "/dispatch add unit test for ABC",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "add unit test for ABC",
+        "inputTask": "add unit test for ABC",
+        "command": "/dispatch add unit test for ABC",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "legacy-provider",
+      "input": "/dispatch claude: add unit test for ABC",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "add unit test for ABC",
+        "inputTask": "add unit test for ABC",
+        "command": "/dispatch claude: add unit test for ABC",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "case-and-no-space",
+      "input": "/dispatch Claude:add unit test",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "add unit test",
+        "inputTask": "add unit test",
+        "command": "/dispatch Claude:add unit test",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "explicit-project",
+      "input": "/dispatch claude@shep: add unit test for ABC",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "add unit test for ABC",
+        "inputTask": "add unit test for ABC",
+        "command": "/dispatch claude@shep: add unit test for ABC",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "project-only",
+      "input": "/dispatch @folio: fix the title bug",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/folio/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "fix the title bug",
+        "inputTask": "fix the title bug",
+        "command": "/dispatch @folio: fix the title bug",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "forced-worktree",
+      "input": "/dispatch codex@shep+wt: refactor control.mjs",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "wt",
+        "template": null,
+        "task": "refactor control.mjs",
+        "inputTask": "refactor control.mjs",
+        "command": "/dispatch codex@shep+wt: refactor control.mjs",
+        "mode": "worktree"
+      }
+    },
+    {
+      "id": "forced-here",
+      "input": "/dispatch claude@shep+here: explain monitor.mjs",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "here",
+        "template": null,
+        "task": "explain monitor.mjs",
+        "inputTask": "explain monitor.mjs",
+        "command": "/dispatch claude@shep+here: explain monitor.mjs",
+        "mode": "here"
+      }
+    },
+    {
+      "id": "fanout",
+      "input": "/dispatch claude,codex@shep: add tests for tui-model",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          },
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "add tests for tui-model",
+        "inputTask": "add tests for tui-model",
+        "command": "/dispatch claude,codex@shep: add tests for tui-model",
+        "mode": "worktree"
+      }
+    },
+    {
+      "id": "profile",
+      "input": "/dispatch claude.fast@shep: explain x",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": "fast"
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "explain x",
+        "inputTask": "explain x",
+        "command": "/dispatch claude.fast@shep: explain x",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "literal-colons",
+      "input": "/dispatch codex: see http://a:b and @src/x.ts",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "see http://a:b and @src/x.ts",
+        "inputTask": "see http://a:b and @src/x.ts",
+        "command": "/dispatch codex: see http://a:b and @src/x.ts",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "template",
+      "input": "/test claude@shep: parseDispatch",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": "test",
+        "task": "Add unit tests for parseDispatch. Follow this repository's existing test framework and conventions, run the relevant tests, and report what you added and the results.",
+        "inputTask": "parseDispatch",
+        "command": "/test claude@shep: parseDispatch",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "unknown-kind",
+      "input": "/dispatch shepp: x",
+      "expected": {
+        "error": "Unknown agent “shepp”. Choose a configured provider such as codex: or claude:."
+      }
+    },
+    {
+      "id": "unknown-project",
+      "input": "/dispatch claude@shepp: x",
+      "expected": {
+        "error": "Unknown project “shepp”. Did you mean shep?"
+      }
+    },
+    {
+      "id": "ambiguous-project",
+      "input": "/dispatch claude@app: x",
+      "expected": {
+        "error": "“app” matches 2 projects: app (/fixture/work/app), app (/fixture/oss/app). Use Tab to pick one."
+      },
+      "context": {
+        "projects": [
+          {
+            "key": "git:/fixture/shep/.git",
+            "name": "shep",
+            "aliases": [
+              "sh"
+            ],
+            "kind": "git",
+            "root": "/fixture/shep",
+            "commonDir": "/fixture/shep/.git",
+            "isolation": "auto",
+            "workspaceIds": [],
+            "sources": [
+              "config"
+            ],
+            "worktrees": []
+          },
+          {
+            "key": "git:/fixture/folio/.git",
+            "name": "folio",
+            "aliases": [],
+            "kind": "git",
+            "root": "/fixture/folio",
+            "commonDir": "/fixture/folio/.git",
+            "isolation": "auto",
+            "workspaceIds": [],
+            "sources": [
+              "config"
+            ],
+            "worktrees": []
+          },
+          {
+            "key": "dir:/fixture/notes",
+            "name": "notes",
+            "aliases": [],
+            "kind": "folder",
+            "root": "/fixture/notes",
+            "commonDir": null,
+            "isolation": "auto",
+            "workspaceIds": [],
+            "sources": [
+              "config"
+            ],
+            "worktrees": []
+          },
+          {
+            "key": "git:/fixture/work/app/.git",
+            "name": "app",
+            "aliases": [
+              "app.work"
+            ],
+            "kind": "git",
+            "root": "/fixture/work/app",
+            "commonDir": "/fixture/work/app/.git",
+            "isolation": "auto",
+            "workspaceIds": [],
+            "sources": [
+              "config"
+            ],
+            "worktrees": []
+          },
+          {
+            "key": "git:/fixture/oss/app/.git",
+            "name": "app",
+            "aliases": [
+              "app.oss"
+            ],
+            "kind": "git",
+            "root": "/fixture/oss/app",
+            "commonDir": "/fixture/oss/app/.git",
+            "isolation": "auto",
+            "workspaceIds": [],
+            "sources": [
+              "config"
+            ],
+            "worktrees": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "unknown-profile",
+      "input": "/dispatch claude.slow@shep: x",
+      "expected": {
+        "error": "Claude has no profile “slow”. Configured: fast."
+      }
+    },
+    {
+      "id": "unknown-mode",
+      "input": "/dispatch claude@shep+x: y",
+      "expected": {
+        "error": "Unknown mode “+x”. Use +wt or +here."
+      }
+    },
+    {
+      "id": "too-many-first",
+      "input": "/dispatch a,b,c,d,e: x",
+      "expected": {
+        "error": "Dispatch to at most 4 agents at once."
+      }
+    },
+    {
+      "id": "duplicate-provider",
+      "input": "/dispatch claude,claude: x",
+      "expected": {
+        "error": "Claude is listed twice."
+      }
+    },
+    {
+      "id": "folder-worktree",
+      "input": "/dispatch codex@notes+wt: x",
+      "expected": {
+        "error": "+wt needs a Git project; notes is a plain folder."
+      }
+    },
+    {
+      "id": "empty-task",
+      "input": "/dispatch claude@shep:",
+      "expected": {
+        "error": "Add a task after /dispatch and the optional agent: prefix."
+      }
+    },
+    {
+      "id": "unknown-command",
+      "input": "/nope x",
+      "expected": {
+        "error": "Use /dispatch [agent:] your task. Example: /dispatch claude: review this project or a template: /test, /fix, /review"
+      }
+    },
+    {
+      "id": "provider-word-is-task",
+      "input": "/dispatch claude review this code",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "review this code",
+        "inputTask": "review this code",
+        "command": "/dispatch claude review this code",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "retained-leading-space",
+      "input": "/dispatch claude:  keep one leading space\nnext",
+      "expected": {
+        "agents": [
+          {
+            "provider": "claude",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": " keep one leading space\nnext",
+        "inputTask": " keep one leading space\nnext",
+        "command": "/dispatch claude:  keep one leading space\nnext",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "tabs",
+      "input": "/dispatch\tcodex:\t\tkeep a tab",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "\tkeep a tab",
+        "inputTask": "\tkeep a tab",
+        "command": "/dispatch\tcodex:\t\tkeep a tab",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "literal-shell-text",
+      "input": "/dispatch codex: --wait $(not-a-command); `literal` \"quotes\"\n羊",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "--wait $(not-a-command); `literal` \"quotes\"\n羊",
+        "inputTask": "--wait $(not-a-command); `literal` \"quotes\"\n羊",
+        "command": "/dispatch codex: --wait $(not-a-command); `literal` \"quotes\"\n羊",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "project-alias",
+      "input": "/dispatch @SH: x",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "x",
+        "inputTask": "x",
+        "command": "/dispatch @SH: x",
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "mode-only",
+      "input": "/dispatch +wt: x",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "",
+        "modeIntent": "wt",
+        "template": null,
+        "task": "x",
+        "inputTask": "x",
+        "command": "/dispatch +wt: x",
+        "mode": "worktree"
+      }
+    },
+    {
+      "id": "context-subfolder",
+      "input": "/dispatch x",
+      "expected": {
+        "agents": [
+          {
+            "provider": "codex",
+            "profile": null
+          }
+        ],
+        "projectKey": "git:/fixture/shep/.git",
+        "subfolder": "src",
+        "modeIntent": "auto",
+        "template": null,
+        "task": "x",
+        "inputTask": "x",
+        "command": "/dispatch x",
+        "mode": "auto"
+      },
+      "context": {
+        "contextSubfolder": "src"
+      }
+    },
+    {
+      "id": "duplicate-kind-profiles",
+      "input": "/dispatch claude.fast,claude: x",
+      "expected": {
+        "error": "Claude is listed twice."
+      }
+    },
+    {
+      "id": "trust-required-project",
+      "input": "/dispatch codex@locked: Keep this literal task",
+      "context": {
+        "trustRequired": [
+          {
+            "kind": "trust_required",
+            "root": "/fixture/locked",
+            "name": "locked",
+            "aliases": [
+              "lk"
+            ],
+            "source": "config",
+            "path": "/fixture/locked/src",
+            "message": "Herdr needs you to confirm you trust /fixture/locked before creating worktrees."
+          }
+        ]
+      },
+      "expected": {
+        "error": "Herdr needs you to confirm you trust /fixture/locked before creating worktrees.",
+        "code": "needs_confirmation",
+        "trust": {
+          "kind": "trust_required",
+          "root": "/fixture/locked",
+          "name": "locked",
+          "aliases": [
+            "lk"
+          ],
+          "source": "config",
+          "path": "/fixture/locked/src",
+          "message": "Herdr needs you to confirm you trust /fixture/locked before creating worktrees."
+        }
+      }
+    }
+  ]
+}

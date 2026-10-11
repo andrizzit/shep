@@ -141,3 +141,28 @@ export function readHerdrSnapshot(options = {}) {
 export async function readDemoSnapshot() {
   return normalizeSnapshot(JSON.parse(await readFile(DEMO_FILE, 'utf8')));
 }
+
+// Complete private topology for placement and cleanup. No task data is added to
+// normalizeSnapshot or to the public monitor snapshot.
+export function normalizeControlSnapshot(raw) {
+  const snapshot = raw?.result?.snapshot;
+  if (!snapshot || !['panes', 'tabs', 'workspaces', 'agents'].every(key => Array.isArray(snapshot[key]))) throw invalidSnapshot();
+  const ids = (items, field) => {
+    const values = items.map(item => item?.[field]);
+    if (values.some(value => typeof value !== 'string' || !value || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) || new Set(values).size !== values.length) throw invalidSnapshot();
+    return new Set(values);
+  };
+  const workspaces = ids(snapshot.workspaces, 'workspace_id');
+  const tabs = ids(snapshot.tabs, 'tab_id');
+  ids(snapshot.panes, 'pane_id'); ids(snapshot.panes, 'terminal_id');
+  if (snapshot.tabs.some(t => !workspaces.has(t.workspace_id)) || snapshot.panes.some(p => !workspaces.has(p.workspace_id)
+    || !tabs.has(p.tab_id) || !snapshot.tabs.some(t => t.tab_id === p.tab_id && t.workspace_id === p.workspace_id))) throw invalidSnapshot();
+  const agentPanes = new Set();
+  for (const agent of snapshot.agents) {
+    const pane = snapshot.panes.find(p => p.pane_id === agent?.pane_id);
+    if (!pane || agentPanes.has(agent.pane_id) || agent.terminal_id !== pane.terminal_id
+      || agent.tab_id !== pane.tab_id || agent.workspace_id !== pane.workspace_id) throw invalidSnapshot();
+    agentPanes.add(agent.pane_id);
+  }
+  return structuredClone(snapshot);
+}

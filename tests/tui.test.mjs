@@ -6,6 +6,7 @@ import { stripVTControlCharacters } from 'node:util';
 import { renderToString } from 'ink';
 import { createTuiModel, editText, parseMouse, hitTest, visibleAgents, parseDispatch } from '../src/tui-model.mjs';
 import { TuiView, startTui } from '../src/tui.mjs';
+import { createFakeRegistry, makeProject } from './helpers/dispatch-fakes.mjs';
 import { displayWidth } from '../src/terminal.mjs';
 
 function fixture() {
@@ -26,8 +27,16 @@ async function harness(overrides = {}) {
     closeAgent: async target => { calls.push(['close', target]); return { ok: true, state: 'closed', message: 'Closed.' }; },
     ...overrides,
   };
-  const model = createTuiModel({ monitor, controller, onQuit: () => calls.push(['quit']) });
+  const dispatch = controller.dispatch;
+  controller.dispatch = (request, { onProgress } = {}) => {
+    onProgress?.({ taskId: request.taskId, attemptId: request.attemptId, stage: 'target', at: new Date().toISOString() });
+    return Promise.resolve(dispatch(request)).then(outcome => ({ ...outcome, taskId: request.taskId, attemptId: request.attemptId }));
+  };
+  const projects = ['app', 'docs'].map(name => makeProject({ key: `dir:/projects/${name}`, name, aliases: [], kind: 'folder', root: `/projects/${name}`, commonDir: null }));
+  const registry = createFakeRegistry({ projects });
+  const model = createTuiModel({ monitor, controller, registry, onQuit: () => calls.push(['quit']) });
   await model.ready;
+  model.action('board-toggle'); // Existing provider-board journeys explicitly select Agents.
   return { model, calls, publish(change) { snapshot = change(structuredClone(snapshot)); listener?.(snapshot); } };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -45,33 +54,39 @@ test('stable selection and draft survive refresh and Escape; paste never trigger
   assert.match(model.getSnapshot().draft.prompt, /not-a-command/);
 });
 
-test('dispatch captures selected provider/workspace/prompt and rejects duplicate pending submit', async t => {
+test('dispatch captures selected provider/project/prompt and rejects duplicate pending submit', async t => {
   let finish;
   const calls = [];
   const { model } = await harness({ dispatch: draft => { calls.push(draft); return new Promise(resolve => { finish = resolve; }); } }); t.after(model.destroy);
   model.action('new'); model.key('', { leftArrow: true });
-  model.action('field', 'workspaceId'); model.key('', { rightArrow: true });
+  model.action('field', 'projectKey'); model.key('', { downArrow: true }); model.key('', { return: true });
   model.action('field', 'prompt'); model.paste('First line\nSecond line');
   model.key('s', { ctrl: true }); model.key('s', { ctrl: true });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { provider: 'claude', workspaceId: 'w2', cwd: '/projects/docs', prompt: 'First line\nSecond line' });
+  assert.equal(calls[0].provider, 'claude');
+  assert.equal(calls[0].prompt, 'First line\nSecond line');
+  assert.equal(calls[0].inputTask, 'First line\nSecond line');
+  assert.deepEqual(calls[0].placement, { projectKey: 'dir:/projects/docs', root: '/projects/docs', mode: 'auto', subfolder: '', label: 'First line', placementStyle: 'tab' });
+  assert.match(calls[0].name, /claude$/);
+  assert(calls[0].taskId && calls[0].attemptId);
   finish({ ok: true, state: 'submitted', message: 'Sent.' }); await settle();
   assert.equal(model.getSnapshot().view, 'board');
   assert.equal(model.getSnapshot().draft.prompt, '');
 });
 
-test('partial launch keeps draft, prevents blind retry, and focuses the controller-tracked pane', async t => {
+test('partial launch keeps draft, allows another independent launch, and focuses the controller-tracked pane', async t => {
   let launches = 0;
   const { model, calls } = await harness({ dispatch: async () => { launches += 1; return { ok: false, state: 'needs_input', message: 'Complete authentication.', paneId: 'w1:p7', terminalId: 't7', agentName: 'new-worker' }; } }); t.after(model.destroy);
   model.action('new'); model.action('field', 'prompt'); model.paste('Keep this prompt.');
   model.action('dispatch'); await settle();
   model.action('dispatch'); await settle();
-  assert.equal(launches, 1);
+  assert.equal(launches, 2);
   assert.equal(model.getSnapshot().draft.prompt, 'Keep this prompt.');
+  assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
   model.action('focus-result'); await settle();
   assert.equal(calls[0][0], 'focus'); assert.equal(calls[0][1].terminalId, 't7');
-  model.action('allow-launch'); model.action('dispatch'); await settle();
-  assert.equal(launches, 2);
+  model.action('new'); model.action('dispatch'); await settle();
+  assert.equal(launches, 3);
 });
 
 test('close confirmation freezes target and refuses changed status or reused pane identity', async t => {
@@ -156,13 +171,16 @@ test('/dispatch unavailable provider never falls back; provider alone and invali
   assert.deepEqual(parseDispatch('/dispatch claude:  keep one leading space\nnext', model.getSnapshot().profiles.providers), { provider: 'claude', prompt: ' keep one leading space\nnext', explicitProvider: true });
 });
 
-test('command input captures control-like letters; partial command stays and blocks repeat Enter', async t => {
+test('command input captures control-like letters; partial command stays while board Enter opens the new pane', async t => {
   const { model, calls } = await harness({ dispatch: async draft => { calls.push(['dispatch', draft]); return { ok: false, state: 'uncertain', message: 'Check the new pane.', paneId: 'w1:p7', terminalId: 't7' }; } }); t.after(model.destroy);
   model.key('/dispatch codex: x q n / are literal');
   model.action('focus'); model.action('close'); assert.equal(calls.length, 0);
   model.key('', { return: true }); await settle(); model.key('', { return: true }); await settle();
-  assert.equal(calls.length, 1); assert.equal(model.getSnapshot().command, '/dispatch codex: x q n / are literal');
+  assert.equal(calls.filter(call => call[0] === 'dispatch').length, 1);
+  assert.equal(calls.filter(call => call[0] === 'focus').length, 1);
+  assert.equal(model.getSnapshot().command, '/dispatch codex: x q n / are literal');
   assert.equal(model.getSnapshot().draft.prompt, 'x q n / are literal');
+  assert.equal(Object.hasOwn(model.getSnapshot(), 'dispatchHold'), false);
 });
 
 test('Ink fixtures fit desktop/narrow panes and preserve essential controls', async t => {

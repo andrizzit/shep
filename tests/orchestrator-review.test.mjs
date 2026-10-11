@@ -1,6 +1,6 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,13 +9,14 @@ import { tmpdir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createController } from '../src/control.mjs';
+import { makeRepo } from './helpers/git-fixtures.mjs';
 import { getHerdrContext, normalizeSnapshot } from '../src/herdr.mjs';
 
 const execute = promisify(execFile);
 const project = fileURLToPath(new URL('../', import.meta.url));
 let temporary, executables;
 before(async () => {
-  temporary = await mkdtemp(join(tmpdir(), 'shep-orchestrator-review-'));
+  temporary = await realpath(await mkdtemp(join(tmpdir(), 'shep-orchestrator-review-')));
   executables = join(temporary, 'controlled binaries');
   await mkdir(executables);
   for (const name of ['codex', 'claude', 'kiro-cli', 'grok']) {
@@ -25,10 +26,27 @@ before(async () => {
 after(async () => { if (temporary) await rm(temporary, { recursive: true, force: true }); });
 
 let installed;
+async function isolatedFixtureEnvironment(directory) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:HERDR_|SHEP_|XDG_|GIT_|NPM_CONFIG_)/i.test(key)
+    && !['HOME', 'USERPROFILE', 'NODE_OPTIONS', 'INIT_CWD'].includes(key)));
+  const paths = {
+    HOME: join(directory, 'home'), XDG_CONFIG_HOME: join(directory, 'config'),
+    XDG_STATE_HOME: join(directory, 'state'), XDG_DATA_HOME: join(directory, 'data'),
+    XDG_CACHE_HOME: join(directory, 'cache'), XDG_RUNTIME_DIR: join(directory, 'runtime'),
+  };
+  await Promise.all(Object.values(paths).map(path => mkdir(path, { recursive: true, mode: 0o700 })));
+  const userConfig = join(paths.HOME, '.npmrc'), globalConfig = join(paths.HOME, 'npm-global.rc');
+  await Promise.all([writeFile(userConfig, ''), writeFile(globalConfig, '')]);
+  return { ...env, ...paths, USERPROFILE: paths.HOME, PWD: directory,
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    npm_config_userconfig: userConfig, npm_config_globalconfig: globalConfig,
+    npm_config_cache: join(paths.XDG_CACHE_HOME, 'npm') };
+}
+
 async function installedCommand() {
   if (installed) return installed;
   const prefix = join(temporary, 'installed app');
-  const env = { ...process.env, npm_config_cache: join(temporary, 'npm-cache') };
+  const env = await isolatedFixtureEnvironment(join(temporary, 'package-environment'));
   const packed = await execute('npm', ['pack', '--json', '--pack-destination', temporary], { cwd: project, env, timeout: 60000 });
   const [artifact] = JSON.parse(packed.stdout);
   await execute('npm', ['install', '--prefix', prefix, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', join(temporary, artifact.filename)], {
@@ -45,6 +63,12 @@ async function atomicJson(path, value) {
 
 // Serialized into a separate controlled executable; this never invokes Herdr.
 async function fakeHerdrMain() {
+  // D0 opt-in: later dispatcher PTY scenarios use the shared, versioned fake.
+  // Existing 0.3.0 journeys and their close/safety assertions remain unchanged.
+  if (process.env.SHEP_TEST_SCENARIO && process.env.SHEP_TEST_DISPATCH_BINARY) {
+    await require(process.env.SHEP_TEST_DISPATCH_BINARY);
+    return;
+  }
   const fs = require('node:fs');
   const stateFile = process.env.ORCHESTRATOR_QA_STATE;
   const read = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
@@ -98,31 +122,68 @@ async function transportFixture() {
   const directory = await mkdtemp(join(temporary, 'pty-host-'));
   const statePath = join(directory, 'state.json');
   const logPath = join(directory, 'calls.jsonl');
+  const scenarioPath = join(directory, 'scenario.json');
+  const startupRelease = join(directory, 'startup-release');
   const binary = join(directory, 'controlled-herdr');
+  const projectPath = join(directory, 'project');
+  const externalPath = join(directory, 'external');
+  await Promise.all([mkdir(projectPath), mkdir(externalPath)]);
   const raw = controllerFixture().raw;
-  raw.result.snapshot.panes[0].cwd = directory;
-  raw.result.snapshot.workspaces.forEach(workspace => {
-    workspace.active_tab_id = workspace.workspace_id === 'w1' ? 'w1:t1' : 'w2:t1';
-    workspace.worktree.checkout_path = directory;
-  });
+  raw.result.snapshot.workspaces.forEach((workspace, index) => Object.assign(workspace, {
+    number: index + 1, active_tab_id: workspace.workspace_id + ':t1', worktree: null,
+    pane_count: index === 0 ? 1 : 2, tab_count: 1, agent_status: 'unknown', focused: index === 0,
+  }));
+  raw.result.snapshot.tabs.forEach((tab, index) => Object.assign(tab, {
+    number: 1, label: 'Existing tab', pane_count: index === 0 ? 1 : 2, agent_status: 'unknown', focused: index === 0,
+  }));
   raw.result.snapshot.agents = [
-    plainAgent({ agent: 'claude', name: 'alpha-fixture', agent_status: 'blocked', terminal_id: 'alpha-terminal' }),
-    plainAgent({ agent: 'codex', name: 'beta-fixture', agent_status: 'done', pane_id: 'w2:p3', terminal_id: 'beta-terminal' }),
+    plainAgent({ agent: 'claude', name: 'alpha-fixture', agent_status: 'blocked', terminal_id: 'alpha-terminal', cwd: externalPath }),
+    plainAgent({ agent: 'codex', name: 'beta-fixture', agent_status: 'done', pane_id: 'w2:p3', terminal_id: 'beta-terminal', cwd: externalPath }),
   ];
   raw.result.snapshot.panes[1].terminal_id = 'alpha-terminal';
   raw.result.snapshot.panes.push({ ...otherPane, pane_id: 'w2:p3', terminal_id: 'beta-terminal' });
-  await atomicJson(statePath, { snapshot: raw.result.snapshot, nextPane: 9, holdStart: false });
-  await writeFile(logPath, '');
+  raw.result.snapshot.panes.forEach((pane, index) => Object.assign(pane, {
+    cwd: index === 0 ? projectPath : externalPath, foreground_cwd: index === 0 ? projectPath : externalPath,
+    focused: index === 0, revision: 0, scroll: { max_offset_from_bottom: 0, offset_from_bottom: 0, viewport_rows: 40 },
+  }));
+  await atomicJson(statePath, { version: 1, snapshot: raw.result.snapshot, nextId: 9, uses: {}, worktrees: [], scaffolding: [], holdStart: false });
+  await atomicJson(scenarioPath, { version: 1, steps: [{ id: 'first-start', match: { prefix: ['agent', 'start'] },
+    effect: 'default', barrierPath: startupRelease, barrierTimeoutMs: 30000 }] });
+  await Promise.all([writeFile(logPath, ''), writeFile(startupRelease, 'released\n')]);
   await writeFile(binary, '#!/usr/bin/env node\n(' + fakeHerdrMain.toString() + ')();\n', { mode: 0o755 });
-  const env = controllerFixture().context.env;
-  Object.assign(env, { HERDR_BIN_PATH: binary, ORCHESTRATOR_QA_STATE: statePath, ORCHESTRATOR_QA_LOG: logPath,
+  const env = await isolatedFixtureEnvironment(directory);
+  Object.assign(env, {
+    HERDR_ENV: '1', HERDR_BIN_PATH: binary, HERDR_SOCKET_PATH: join(directory, 'current.sock'),
+    HERDR_PANE_ID: ownPane.pane_id, HERDR_TAB_ID: ownPane.tab_id, HERDR_WORKSPACE_ID: ownPane.workspace_id,
+    PATH: executables + delimiter + (env.PATH || ''), SHEP_TEST_MODE: 'scripted', SHEP_TEST_SCENARIO: scenarioPath,
+    SHEP_TEST_DISPATCH_BINARY: join(project, 'tests', 'fixtures', 'fake-herdr.cjs'),
+    SHEP_TEST_STATE: statePath, SHEP_TEST_LOG: logPath, SHEP_TEST_DELIVERY: 'type',
     TERM: 'xterm-256color', FORCE_COLOR: '1', CI: '' });
   delete env.NO_COLOR;
+  const configPath = join(env.XDG_CONFIG_HOME, 'shep', 'config.json');
+  await mkdir(join(env.XDG_CONFIG_HOME, 'shep'));
+  await atomicJson(configPath, { projects: { entries: [{ name: 'fixture', path: projectPath }] } });
   return {
-    directory, env, statePath,
+    directory, env, statePath, scenarioPath, projectPath, externalPath, configPath,
+    historyPath: join(env.XDG_STATE_HOME, 'shep', 'history.jsonl'),
     calls: async () => (await readFile(logPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
     readState: async () => JSON.parse(await readFile(statePath, 'utf8')),
-    setState: value => atomicJson(statePath, value),
+    setState: async change => {
+      // Snapshot reads also rewrite this file in the fake host. Use its same
+      // bounded lock so they cannot overwrite a test's state transition.
+      const lock = statePath + '.lock';
+      const deadline = Date.now() + 2500;
+      for (;;) {
+        try { await mkdir(lock); break; }
+        catch (error) { if (error.code !== 'EEXIST' || Date.now() > deadline) throw error; await delay(5); }
+      }
+      try {
+        const value = typeof change === 'function' ? change(JSON.parse(await readFile(statePath, 'utf8'))) : change;
+        if (value.holdStart) await rm(startupRelease, { force: true });
+        else await writeFile(startupRelease, 'released\n');
+        await atomicJson(statePath, value);
+      } finally { await rmdir(lock); }
+    },
   };
 }
 
@@ -186,13 +247,20 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
     cwd: fixture.directory, env: fixture.env, stdio: ['pipe', 'pipe', 'pipe'],
   });
   let pending = '', transcript = '', errorOutput = '', exit;
+  const frames = [];
   child.stdout.on('data', chunk => {
     pending += chunk;
     let newline;
     while ((newline = pending.indexOf('\n')) >= 0) {
       const event = JSON.parse(pending.slice(0, newline));
       pending = pending.slice(newline + 1);
-      if (event.event === 'data') transcript += event.text;
+      if (event.event === 'data') {
+        transcript += event.text;
+        if (event.text.includes('\x1b[?2026l') && transcript.lastIndexOf('\x1b[?2026l') > transcript.lastIndexOf('\x1b[?2026h')) {
+          frames.push(terminalScreen(transcript, columns, rows));
+          if (frames.length > 1000) frames.shift();
+        }
+      }
       if (event.event === 'exit') exit = event;
     }
   });
@@ -204,7 +272,7 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
   });
   const pty = {
-    port, output: () => transcript, errors: () => errorOutput, exited: () => exit,
+    port, output: () => transcript, frames: () => [...frames], errors: () => errorOutput, exited: () => exit,
     send: value => child.stdin.write(JSON.stringify({ type: 'input', value }) + '\n'),
     screen: () => terminalScreen(transcript, columns, rows),
     resize: (nextColumns, nextRows) => {
@@ -212,7 +280,14 @@ async function startInstalledPty(t, fixture, { columns = 140, rows = 45 } = {}) 
       child.stdin.write(JSON.stringify({ type: 'resize', columns, rows }) + '\n');
     },
   };
-  await waitFor(() => pty.screen().includes('YOUR AGENTS'), 'Installed Ink app did not render: ' + errorOutput);
+  await waitFor(() => {
+    const output = pty.output();
+    // PTY data is chunked: the board title can arrive before the rest of its
+    // frame and the mouse setup written immediately after Ink's first render.
+    return output.includes('\x1b[?1000h') && output.includes('\x1b[?1006h')
+      && output.lastIndexOf('\x1b[?2026l') > output.lastIndexOf('\x1b[?2026h')
+      && (pty.screen().includes('YOUR AGENTS') || pty.screen().includes('TASKS'));
+  }, 'Installed Ink app did not finish startup: ' + errorOutput);
   return pty;
 }
 
@@ -247,6 +322,16 @@ function terminalScreen(transcript, width = 140, height = 45) {
     grid[y][x++] = value;
   }
   return grid.map(row => row.join('')).join('\n');
+}
+
+function hasStartedNotice(pty) {
+  const text = pty.screen().replace(/\s+/g, ' ');
+  return text.includes('started in') && text.includes('Enter to open');
+}
+
+async function enterAgents(pty) {
+  if (!pty.screen().includes('YOUR AGENTS')) pty.send('g');
+  await waitFor(() => pty.screen().includes('YOUR AGENTS'), 'Agents navigation did not restore the live agent list');
 }
 
 async function clickText(pty, text) {
@@ -340,7 +425,7 @@ function controllerFixture({ mode = 'live', state = 'connected', invoke } = {}) 
     }
     throw new Error('Unexpected controlled command: ' + argv.slice(0, 2).join(' '));
   };
-  const controller = createController({ context, monitor, mode, run, readRaw: async () => structuredClone(raw) });
+  const controller = createController({ context, monitor, mode, run, delivery: 'type', readRaw: async () => structuredClone(raw) });
   return { controller, raw, calls, monitor, context,
     setState: (value) => { snapshot.source.state = value; },
     selected: () => structuredClone(snapshot.agents[0]),
@@ -411,7 +496,7 @@ test('orchestrator QA: prompt punctuation and multiline content remain one liter
   assert.equal(result.state, 'submitted');
   const sent = fixture.calls.filter(({ argv }) => argv[0] === 'agent' && argv[1] === 'prompt');
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0].argv, ['agent', 'prompt', 'w1:p9', prompt]);
+  assert.deepEqual(sent[0].argv, ['agent', 'prompt', 'w1:p9', prompt, '--wait', '--until', 'working', '--timeout', '6000']);
   assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'split').length, 1);
   assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'start').length, 1);
   assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'close').length, 0);
@@ -461,7 +546,7 @@ test('orchestrator QA: ambiguous prompt timeout is not retried or rolled back by
   assert.doesNotMatch(result.message, /PRIVATE_TRANSPORT_DETAILS/);
 });
 
-test('orchestrator QA: concurrent launch is rejected and disposal aborts pending startup without later writes', async () => {
+test('orchestrator QA: disposal aborts pending startup without later writes', async () => {
   let entered;
   const starting = new Promise(resolve => { entered = resolve; });
   let signal;
@@ -479,9 +564,6 @@ test('orchestrator QA: concurrent launch is rejected and disposal aborts pending
   } });
   const pending = fixture.controller.dispatch({ provider: 'codex', prompt: 'Only one launch.', cwd: temporary });
   await starting;
-  const duplicate = await fixture.controller.dispatch({ provider: 'codex', prompt: 'Only one launch.', cwd: temporary });
-  assert.equal(duplicate.ok, false);
-  assert.equal(duplicate.code, 'busy');
   fixture.controller.dispose();
   assert.equal((await pending).ok, false);
   assert.equal(signal.aborted, true);
@@ -494,11 +576,99 @@ test('orchestrator QA: concurrent launch is rejected and disposal aborts pending
   assert.equal(fixture.calls.length, count);
 });
 
+test('orchestrator QA: three launches run, the fourth queues FIFO, and disposal cancels queued work without duplicate sends', async t => {
+  let nextPane = 9;
+  const started = [], starts = new Map(), progress = new Map();
+  const fixture = controllerFixture({ invoke: async (argv, raw, options) => {
+    if (argv[0] === 'pane' && argv[1] === 'split') {
+      const pane = { pane_id: `w1:p${nextPane}`, terminal_id: `queue-terminal-${nextPane++}`, tab_id: 'w1:t1', workspace_id: 'w1' };
+      raw.result.snapshot.panes.push(pane);
+      return { result: { pane } };
+    }
+    if (argv[0] !== 'agent' || argv[1] !== 'start') return undefined;
+    const name = argv[2];
+    const pane = raw.result.snapshot.panes.find(item => item.pane_id === argv[argv.indexOf('--pane') + 1]);
+    await new Promise((resolve, reject) => {
+      const cancel = () => {
+        const error = new Error('Controlled queued startup aborted');
+        error.code = 'disposed';
+        reject(error);
+      };
+      options.signal.addEventListener('abort', cancel, { once: true });
+      starts.set(name, {
+        signal: options.signal,
+        release: () => { options.signal.removeEventListener('abort', cancel); resolve(); },
+      });
+      started.push(name);
+      if (options.signal.aborted) cancel();
+    });
+    const agent = plainAgent({ ...pane, name, agent: 'codex', agent_status: 'idle' });
+    raw.result.snapshot.agents.push(agent);
+    return { result: { agent } };
+  } });
+  t.after(() => fixture.controller.dispose());
+  const requests = Array.from({ length: 5 }, (_, index) => ({
+    taskId: `queue-task-${index + 1}`, attemptId: `queue-attempt-${index + 1}`,
+    provider: 'codex', name: `queue-agent-${index + 1}`, cwd: temporary,
+    prompt: `Literal queue task ${index + 1}: $(not-a-command)\nSecond line.`,
+  }));
+  const pending = requests.map(request => fixture.controller.dispatch(request, {
+    onProgress: event => {
+      const events = progress.get(event.taskId) ?? [];
+      events.push(event.stage); progress.set(event.taskId, events);
+    },
+  }));
+  assert.equal(fixture.controller.dispatch(requests[0]), pending[0]);
+  assert.equal(fixture.controller.dispatch(requests[3]), pending[3]);
+  await waitFor(() => started.length === 3, 'Three independent launches did not reach startup');
+  assert.deepEqual([...started].sort(), requests.slice(0, 3).map(request => request.name).sort());
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'split').length, 3);
+  assert.deepEqual(progress.get(requests[3].taskId), ['queued']);
+  assert.deepEqual(progress.get(requests[4].taskId), ['queued']);
+  assert.equal(writes(fixture).some(({ argv }) => argv[1] === 'prompt'), false);
+
+  starts.get(requests[0].name).release();
+  const submitted = await pending[0];
+  assert.equal(submitted.state, 'submitted', submitted.message);
+  await waitFor(() => started.length === 4, 'The fourth launch did not start when capacity became available');
+  assert.deepEqual([...started.slice(0, 3)].sort(), requests.slice(0, 3).map(request => request.name).sort());
+  assert.equal(started[3], requests[3].name);
+  assert.deepEqual(progress.get(requests[4].taskId), ['queued']);
+  assert.equal(fixture.controller.dispatch(requests[0]), pending[0]);
+  assert.deepEqual(fixture.calls.filter(({ argv }) => argv[1] === 'prompt').map(({ argv }) => argv), [
+    ['agent', 'prompt', submitted.paneId, requests[0].prompt, '--wait', '--until', 'working', '--timeout', '6000'],
+  ]);
+
+  fixture.controller.dispose();
+  const results = await Promise.all(pending);
+  for (const result of results.slice(1, 4)) {
+    assert.equal(result.state, 'uncertain');
+    assert.equal(result.code, 'disposed');
+    assert.ok(fixture.raw.result.snapshot.panes.some(pane => pane.pane_id === result.paneId && pane.terminal_id === result.terminalId));
+  }
+  assert.equal(results[4].state, 'failed');
+  assert.equal(results[4].code, 'disposed');
+  assert.equal(results[4].created, undefined);
+  assert.equal(results[4].paneId, undefined);
+  for (const start of starts.values()) assert.equal(start.signal.aborted, true);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'split').length, 4);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'start').length, 4);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'prompt').length, 1);
+  assert.equal(writes(fixture).filter(({ argv }) => argv[1] === 'close').length, 0);
+  assert.equal(new Set(results.slice(0, 4).map(result => result.paneId)).size, 4);
+  const count = fixture.calls.length;
+  assert.equal(fixture.controller.dispatch(requests[3]), pending[3]);
+  assert.equal(fixture.controller.dispatch(requests[4]), pending[4]);
+  assert.equal((await fixture.controller.dispatch({ ...requests[4], taskId: 'after-disposal' })).code, 'disposed');
+  assert.equal(fixture.calls.length, count);
+});
+
 test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed close, and literal colon dispatch commands', { timeout: 90000 }, async t => {
   const fixture = await transportFixture();
   const pty = await startInstalledPty(t, fixture);
   assert.match(pty.output(), /\x1b\[\?1000h/);
   assert.match(pty.output(), /\x1b\[\?1006h/);
+  await enterAgents(pty);
   pty.send('\x1b[B');
   await delay(80);
   pty.send('\r');
@@ -535,7 +705,7 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
     ['/dispatch claude: fix the ledger', 'claude', 'fix the ledger'],
     ['/dispatch fix the settings pange', 'codex', 'fix the settings pange'],
     ['/dispatch grok: write the docker compose file', 'grok', 'write the docker compose file'],
-    ['/dispatch claude explain this fixture', 'codex', 'claude explain this fixture'],
+    ['/dispatch claude explain this fixture', 'claude', 'explain this fixture'],
     ['/dispatch add voice input to shep', 'codex', 'add voice input to shep'],
     ['/dispatch claude: ' + literal, 'claude', literal],
   ];
@@ -547,18 +717,21 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
     assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, index, 'Pasting must not dispatch');
     pty.send('\r');
     if (index === 0) {
-      await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'created-9'), 'Created agent was not recorded before pending start');
+      await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'fixture-terminal-9'), 'Created agent was not recorded before pending start');
       pty.send('\r');
       await delay(60);
       assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'start').length, 1, 'Duplicate Enter launched twice');
       const state = await fixture.readState(); state.holdStart = false; await fixture.setState(state);
     }
     await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === index + 1, 'Slash command did not dispatch exactly once: ' + command);
-    await waitFor(() => pty.screen().includes('Prompt submitted'), 'Dispatch result did not reach Ink');
+    await waitFor(() => hasStartedNotice(pty) || (index === 0 && pty.screen().includes('Focused the selected agent pane.')
+      && pty.screen().includes('Startup: Prompt submitted.')), 'Dispatch result did not reach Ink');
     await delay(70);
     const calls = await fixture.calls();
     const starts = calls.filter(({ args }) => args[1] === 'start');
     const prompts = calls.filter(({ args }) => args[1] === 'prompt');
+    if (index === 0) assert.ok(calls.some(({ args }) => args[0] === 'agent' && args[1] === 'focus'
+      && args[2] === starts[0].args[starts[0].args.indexOf('--pane') + 1]), 'Pending Enter must focus the exact newly created pane');
     assert.equal(starts[index].args[starts[index].args.indexOf('--kind') + 1], provider);
     assert.equal(prompts[index].args[3], prompt);
   }
@@ -570,17 +743,18 @@ test('orchestrator QA: installed Ink accepts keyboard/mouse focus, confirmed clo
   assert.equal(exit.rawRestored, true);
   for (const sequence of ['\x1b[?1000l', '\x1b[?1006l', '\x1b[?1049l']) assert.ok(pty.output().includes(sequence), 'Missing terminal cleanup sequence');
   await assert.rejects(fetch('http://127.0.0.1:' + pty.port + '/api/snapshot'));
-  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'created-9'), 'Quitting must preserve created agents');
+  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'fixture-terminal-9'), 'Quitting must preserve created agents');
 });
 
 test('orchestrator QA: quitting installed Ink during pending startup exits promptly and never sends the prompt', { timeout: 30000 }, async t => {
   const fixture = await transportFixture();
   const state = await fixture.readState(); state.holdStart = true; await fixture.setState(state);
   const pty = await startInstalledPty(t, fixture);
+  await waitFor(() => pty.screen().includes('Codex · fixture') && !pty.screen().includes('Projects loading'), 'Pending fixture project did not load');
   pty.send('\x1b[200~/dispatch keep this fixture pending\x1b[201~');
-  await delay(70);
+  await waitFor(() => pty.screen().includes('/dispatch keep this fixture pending'), 'Pending command input was not rendered');
   pty.send('\r');
-  await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'created-9'), 'Pending startup was not entered');
+  await waitFor(async () => (await fixture.readState()).snapshot.agents.some(agent => agent.terminal_id === 'fixture-terminal-9'), 'Pending startup was not entered');
   const started = Date.now();
   pty.send('\x03');
   const exit = await waitFor(() => pty.exited(), 'Quit hung on the pending Herdr startup', 4500);
@@ -589,7 +763,7 @@ test('orchestrator QA: quitting installed Ink during pending startup exits promp
   assert.equal(exit.rawRestored, true);
   const commands = await fixture.calls();
   assert.equal(commands.some(({ args }) => ['prompt', 'close'].includes(args[1])), false);
-  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'created-9'));
+  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === 'fixture-terminal-9'));
   for (const sequence of ['\x1b[?1000l', '\x1b[?1006l', '\x1b[?1049l']) assert.ok(pty.output().includes(sequence));
 });
 
@@ -598,7 +772,16 @@ test('orchestrator QA: installed NO_COLOR layout fits exact terminal width and c
   fixture.env.NO_COLOR = '1';
   delete fixture.env.FORCE_COLOR;
   const pty = await startInstalledPty(t, fixture, { columns: 123, rows: 35 });
-  await waitFor(() => pty.screen().includes('SELECTED AGENT'), 'Desktop detail panel did not render');
+  await enterAgents(pty);
+  await waitFor(() => {
+    const screen = pty.screen();
+    const detail = screen.split('\n').map(row => {
+      const start = row.indexOf('││'), end = row.lastIndexOf('│');
+      // Remove the fixed panel borders/padding, keeping spaces in wrapped text.
+      return start < 0 ? '' : row.slice(start + 3, end - 1);
+    }).join('');
+    return screen.includes('alpha-fixture') && detail.includes('Task text unavailable for this agent.');
+  }, 'Desktop detail panel did not render');
   const desktop = pty.screen().split('\n');
   const desktopTop = desktop.find(row => row.includes('╭'));
   assert.equal(desktopTop?.slice(-2), '╮ ', 'Desktop right border must fit with one reserved physical column');
@@ -621,4 +804,307 @@ test('orchestrator QA: installed NO_COLOR layout fits exact terminal width and c
   assert.equal(exit.code, 0, pty.errors());
   assert.equal(exit.rawRestored, true);
   assert.equal((await fixture.calls()).some(({ args }) => ['close', 'focus', 'split', 'start', 'prompt'].includes(args[1])), false);
+});
+
+// Checkpoint acceptance uses the actual installed CLI, project registry and
+// modern controller path. Only Herdr is replaced by the frozen native-shaped
+// transport; the synthetic folders never refer to an owner's repository.
+test('checkpoint QA: installed targeting uses tabs and new workspaces, not split fallback, and keeps private state off the browser', { timeout: 90000 }, async t => {
+  const fixture = await transportFixture();
+  const remoteProject = join(fixture.directory, 'remote-project');
+  await mkdir(remoteProject);
+  const config = { projects: { entries: [
+    { name: 'fixture', path: fixture.projectPath }, { name: 'remote', path: remoteProject },
+  ] }, templates: { privatefixture: 'PRIVATE_CONFIG_SENTINEL {task}' } };
+  await atomicJson(fixture.configPath, config);
+  const originalConfig = await readFile(fixture.configPath, 'utf8');
+  const pty = await startInstalledPty(t, fixture);
+  assert.ok(pty.screen().includes('TASKS'), 'The checkpoint must start on its Tasks board');
+  await waitFor(() => pty.screen().includes('Codex · fixture') && !pty.screen().includes('Projects loading'), 'The configured context project was not resolved');
+  const before = await fixture.readState();
+  const ownTab = structuredClone(before.snapshot.tabs.find(tab => tab.tab_id === ownPane.tab_id));
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'notification'), false, 'Existing blocked/done agents must not trigger startup notifications');
+
+  const prompts = [
+    'Verify the literal targeted checkpoint request carefully\nPRIVATE_PROMPT_SENTINEL $(no-shell); --flag',
+    'Default provider stays Codex',
+    ...Array.from({ length: 8 }, (_, index) => `Sequential tab acceptance ${index + 3}`),
+  ];
+  for (const [index, prompt] of prompts.entries()) {
+    const command = index === 0 ? '/dispatch claude@fixture: ' + prompt : '/dispatch ' + prompt;
+    pty.send('\x1b[200~' + command + '\x1b[201~');
+    await delay(50);
+    assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, index, 'Paste alone must not send work');
+    pty.send('\r');
+    await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === index + 1, 'A sequential modern dispatch did not deliver once');
+    await waitFor(() => hasStartedNotice(pty), 'The modern task outcome was not rendered');
+    const calls = await fixture.calls();
+    const start = calls.filter(({ args }) => args[1] === 'start')[index].args;
+    const submitted = calls.filter(({ args }) => args[1] === 'prompt')[index].args;
+    assert.equal(start[start.indexOf('--kind') + 1], index === 0 ? 'claude' : 'codex');
+    assert.equal(submitted[3], prompt);
+    assert.match(start[2], /^[a-z][a-z0-9_-]{0,31}$/);
+  }
+  const tabCalls = (await fixture.calls()).filter(({ args }) => args[0] === 'tab' && args[1] === 'create');
+  assert.equal(tabCalls.length, 10, 'Every same-project dispatch must create a tab');
+  for (const { args } of tabCalls) {
+    assert.equal(args[args.indexOf('--workspace') + 1], 'w1');
+    assert.ok(args.includes('--no-focus'));
+  }
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'pane' && args[1] === 'split'), false, 'Modern placement must not pass by exercising legacy split');
+  const afterTabs = await fixture.readState();
+  assert.deepEqual(afterTabs.snapshot.tabs.find(tab => tab.tab_id === ownPane.tab_id), ownTab, 'Launching tabs must preserve Shep’s existing tab');
+  assert.equal(afterTabs.snapshot.focused_pane_id, ownPane.pane_id);
+  assert.equal(new Set(afterTabs.snapshot.agents.filter(agent => agent.terminal_id.startsWith('fixture-terminal-')).map(agent => agent.name)).size, 10);
+
+  pty.send('\x1b[200~/dispatch codex@remote: Open the unopened project\x1b[201~');
+  await delay(50); pty.send('\r');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 11, 'Project without an open workspace did not receive the task');
+  await waitFor(() => hasStartedNotice(pty), 'Workspace dispatch outcome did not render');
+  const calls = await fixture.calls();
+  const created = calls.filter(({ args }) => args[0] === 'workspace' && args[1] === 'create');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].args[created[0].args.indexOf('--label') + 1], 'remote');
+  assert.equal(created[0].args[created[0].args.indexOf('--cwd') + 1], remoteProject);
+  assert.ok(created[0].args.includes('--no-focus'));
+  const state = await fixture.readState();
+  const launched = state.snapshot.agents.find(agent => agent.name === calls.filter(({ args }) => args[1] === 'start').at(-1).args[2]);
+  assert.equal(launched.cwd, remoteProject);
+  assert.equal(state.snapshot.panes.filter(pane => pane.workspace_id === launched.workspace_id).length, 1, 'New workspace launch must use its root pane');
+  assert.equal(state.snapshot.focused_pane_id, ownPane.pane_id);
+
+  const response = await fetch('http://127.0.0.1:' + pty.port + '/api/snapshot');
+  assert.equal(response.status, 200);
+  const publicSnapshot = await response.json();
+  assert.deepEqual(Object.keys(publicSnapshot).sort(), ['agents', 'mode', 'polledAt', 'refreshIntervalMs', 'schemaVersion', 'source', 'updatedAt']);
+  const serialized = JSON.stringify(publicSnapshot);
+  assert.doesNotMatch(serialized, /PRIVATE_(?:PROMPT|CONFIG)_SENTINEL|"(?:tasks|prompt|inputTask|history|config|args|intent|created)"\s*:/);
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const refused = await fetch('http://127.0.0.1:' + pty.port + '/api/snapshot', { method, body: 'PRIVATE_BROWSER_WRITE' });
+    assert.equal(refused.status, 405);
+  }
+  assert.equal((await fetch('http://127.0.0.1:' + pty.port + '/')).status, 200);
+  assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, 11);
+  await assert.rejects(readFile(fixture.historyPath), { code: 'ENOENT' });
+  assert.equal(await readFile(fixture.configPath, 'utf8'), originalConfig);
+  pty.send('q');
+  const exit = await waitFor(() => pty.exited(), 'Checkpoint app did not quit');
+  assert.equal(exit.code, 0, pty.errors());
+  assert.equal(exit.rawRestored, true);
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'pane' && args[1] === 'close'), false);
+  assert.equal((await fixture.readState()).snapshot.agents.filter(agent => agent.terminal_id.startsWith('fixture-terminal-')).length, 11);
+});
+
+for (const [label, columns, rows, subfolder] of [
+  ['ordinary path', 123, 35, 'src/api'],
+  ['long path in the minimum terminal', 40, 15, 'src/' + 'nested-checkpoint-folder-'.repeat(7) + '/api'],
+]) test(`checkpoint QA: installed explicit worktree visibly explains ${label} and uses the returned root`, { timeout: 45000 }, async t => {
+  const repo = await makeRepo({ files: { 'README.md': 'Synthetic isolation acceptance.\n', [subfolder + '/sample.txt']: 'Fixture content.\n' } });
+  t.after(repo.cleanup);
+  const fixture = await transportFixture();
+  const checkout = join(fixture.directory, 'controlled-checkout');
+  await mkdir(checkout);
+  const state = await fixture.readState();
+  Object.assign(state.snapshot.panes[0], { cwd: join(repo.root, subfolder), foreground_cwd: join(repo.root, subfolder) });
+  const existing = state.snapshot.agents.find(agent => agent.name === 'beta-fixture');
+  Object.assign(existing, { cwd: repo.root, agent_status: 'working' });
+  Object.assign(state.snapshot.panes.find(pane => pane.pane_id === existing.pane_id), { cwd: repo.root, foreground_cwd: repo.root });
+  await fixture.setState(state);
+  await atomicJson(fixture.configPath, { projects: { entries: [{ name: 'rootnotice', path: repo.root }] }, notifications: { enabled: false } });
+  const creationRelease = join(fixture.directory, 'creation-release');
+  const scenario = JSON.parse(await readFile(fixture.scenarioPath, 'utf8'));
+  Object.assign(scenario, { worktreePath: checkout, worktreeSource: { repo_key: repo.commonDir, repo_name: 'rootnotice', repo_root: repo.root,
+    source_checkout_path: repo.root, source_workspace_id: 'w1' } });
+  scenario.steps.unshift({ id: 'observe-worktree-creation', match: { prefix: ['worktree', 'create'] }, effect: 'default', barrierPath: creationRelease, barrierTimeoutMs: 15000 });
+  await atomicJson(fixture.scenarioPath, scenario);
+  const pty = await startInstalledPty(t, fixture, { columns, rows });
+  await waitFor(() => pty.screen().includes('rootnotice') && !pty.screen().includes('Projects loading'), 'The synthetic Git project did not load');
+  pty.send('\x1b[200~/dispatch codex+wt: Check root placement\x1b[201~');
+  await delay(60); pty.send('\r');
+  const meaning = columns === 40 ? 'Worktree starts at repository root; selected subfolder is not applied'
+    : "Worktree starts at the repository root; subfolder src/api isn't applied";
+  await waitFor(() => pty.frames().some(frame => frame.replace(/\s+/g, ' ').includes(meaning)), 'The full root-location consequence was not visibly flushed');
+  await waitFor(async () => (await fixture.calls()).some(call => call.stepId === 'observe-worktree-creation'), 'Explicit worktree creation did not follow the notice');
+  const creating = (await fixture.calls()).find(call => call.stepId === 'observe-worktree-creation').args;
+  assert.equal(creating[creating.indexOf('--cwd') + 1], repo.root, 'A subfolder must never be passed as the worktree launch root');
+  assert.equal(creating.includes('--path'), false, 'The test must not inject a production request flag to make the fake pass');
+  assert.equal(creating.includes('--trust-repository'), false, 'Normal placement must not silently grant repository trust');
+  assert.match(creating[creating.indexOf('--branch') + 1], /^shep\/check-root-placement-[a-f0-9]{4}$/);
+  assert.equal((await fixture.calls()).some(({ args }) => args[1] === 'start'), false, 'The held creation response must not allow agent startup');
+  await writeFile(creationRelease, 'released\n');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 1, 'The root-only worktree launch did not submit once');
+  await waitFor(() => hasStartedNotice(pty), 'Worktree outcome did not render');
+  const after = await fixture.readState();
+  const agent = after.snapshot.agents.find(item => item.terminal_id === 'fixture-terminal-9');
+  assert.equal(agent.cwd, checkout);
+  assert.equal(after.snapshot.panes.find(pane => pane.pane_id === agent.pane_id).foreground_cwd, checkout);
+  assert.equal(after.snapshot.focused_pane_id, ownPane.pane_id);
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'notification'), false);
+  pty.send('d');
+  await waitFor(() => pty.screen().includes('TASK ·'), 'Created task detail was not accessible');
+  let detail = '';
+  for (let index = 0; index < 70; index += 1) {
+    detail += '\n' + pty.screen();
+    pty.send('\x1b[B'); await delay(40);
+  }
+  assert.ok(detail.includes('Worktree') || detail.includes('worktree'), 'Detail must retain actual worktree placement');
+  assert.ok(detail.includes('Subfolder') || detail.includes('subfolder'), 'Detail must keep the requested subfolder accessible');
+  pty.send('q');
+  const exit = await waitFor(() => pty.exited(), 'Isolation acceptance did not quit');
+  assert.equal(exit.code, 0, pty.errors());
+  assert.equal(exit.rawRestored, true);
+  assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, 1);
+  assert.equal((await fixture.calls()).some(({ args }) => ['close', 'remove'].includes(args[1])), false);
+  assert.ok((await fixture.readState()).snapshot.panes.some(pane => pane.terminal_id === agent.terminal_id), 'Quitting must preserve the created worktree agent');
+});
+
+test('checkpoint QA: compact mouse project picker and Other folder keep literal compose drafts and only session recall', { timeout: 60000 }, async t => {
+  const fixture = await transportFixture();
+  const chosen = join(fixture.directory, 'chosen-folder');
+  await mkdir(chosen);
+  const originalConfig = await readFile(fixture.configPath, 'utf8');
+  fixture.env.NO_COLOR = '1'; delete fixture.env.FORCE_COLOR;
+  const pty = await startInstalledPty(t, fixture, { columns: 40, rows: 15 });
+  await waitFor(() => pty.screen().includes('Codex · fixture'), 'Context project was not ready');
+  pty.send('n');
+  await waitFor(() => pty.screen().includes('NEW TASK'), 'Composer did not open at the minimum size');
+  pty.send('\t');
+  await waitFor(() => pty.screen().includes('Project'), 'Project field was not keyboard reachable');
+  await clickText(pty, 'Project');
+  await waitFor(() => pty.screen().includes('SELECT PROJECT'), 'Mouse project picker did not open');
+  await clickText(pty, 'Other folder');
+  await waitFor(() => pty.screen().includes('OTHER FOLDER'), 'Other folder input did not open');
+  pty.send('\x1b[200~' + chosen + '\x1b[201~');
+  await delay(50); pty.send('\r');
+  await waitFor(() => pty.screen().includes('Folder selected for this session'), 'Session-only folder registration was not acknowledged');
+  assert.equal(await readFile(fixture.configPath, 'utf8'), originalConfig);
+  pty.send('\t');
+  await waitFor(() => pty.screen().includes('Name (optional)'), 'Name field was not reachable');
+  pty.send('literal-compact-task');
+  pty.send('\t');
+  await waitFor(() => pty.screen().includes('Task') && pty.screen().includes('Enter newline'), 'Multiline task field was not reachable');
+  const prompt = 'Compact literal first line\n$(no-shell) --literal café';
+  pty.send('\x1b[200~' + prompt + '\x1b[201~');
+  await delay(50);
+  assert.equal((await fixture.calls()).some(({ args }) => args[1] === 'start'), false);
+  pty.send('\x13');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 1, 'Compact composer did not submit');
+  await waitFor(() => hasStartedNotice(pty), 'Compact outcome was not rendered');
+  const calls = await fixture.calls();
+  const start = calls.find(({ args }) => args[1] === 'start').args;
+  assert.equal(start[2], 'literal-compact-task');
+  assert.equal(start[start.indexOf('--kind') + 1], 'codex');
+  assert.equal(calls.find(({ args }) => args[1] === 'prompt').args[3], prompt);
+  assert.equal(calls.find(({ args }) => args[0] === 'workspace' && args[1] === 'create').args.includes(chosen), true);
+
+  const command = '/dispatch claude: Recall marker';
+  pty.send('\x1b[200~' + command + '\x1b[201~'); await delay(50); pty.send('\r');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 2, 'Session recall seed was not submitted');
+  await waitFor(() => hasStartedNotice(pty), 'Recall seed outcome was not rendered');
+  pty.send('\x1b[200~/dispatch preserved draft\x1b[201~'); await delay(50); pty.send('\x1b[A');
+  await waitFor(() => pty.screen().includes(command), 'Up did not recall this run’s command');
+  pty.send('\x1b');
+  await waitFor(() => pty.screen().includes('/dispatch preserved draft'), 'Escape did not restore the draft displaced by recall');
+  assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, 2, 'Recall must not dispatch');
+  pty.send('\x1b'); await delay(50); pty.send('q');
+  assert.equal((await waitFor(() => pty.exited(), 'Compact app did not quit')).rawRestored, true);
+  await assert.rejects(readFile(fixture.historyPath), { code: 'ENOENT' });
+  assert.equal(await readFile(fixture.configPath, 'utf8'), originalConfig);
+
+  const restarted = await startInstalledPty(t, fixture, { columns: 40, rows: 15 });
+  await waitFor(() => !restarted.screen().includes('Projects loading'), 'Restart discovery did not finish');
+  restarted.send('\x1b[200~/dispatch fresh draft\x1b[201~'); await delay(50); restarted.send('\x1b[A');
+  await waitFor(() => restarted.screen().includes('/dispatch fresh draft'), 'A fresh process restored private command history');
+  assert.equal(restarted.screen().includes(command), false);
+  assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length, 2);
+  restarted.send('\x03');
+  assert.equal((await waitFor(() => restarted.exited(), 'Restarted app did not quit')).rawRestored, true);
+  await assert.rejects(readFile(fixture.historyPath), { code: 'ENOENT' });
+  assert.doesNotMatch(pty.output(), /\x1b\[[0-9;]*(?:38|48);[0-9;]*m/);
+});
+
+test('checkpoint QA: installed task transitions drive one notification and a real local Git summary without exposing deferred controls', { timeout: 45000 }, async t => {
+  const repo = await makeRepo(); t.after(repo.cleanup);
+  const fixture = await transportFixture();
+  const state = await fixture.readState();
+  Object.assign(state.snapshot.panes[0], { cwd: repo.root, foreground_cwd: repo.root });
+  await fixture.setState(state);
+  await atomicJson(fixture.configPath, { projects: { entries: [{ name: 'summaryfixture', path: repo.root }] } });
+  const pty = await startInstalledPty(t, fixture, { columns: 123, rows: 35 });
+  await waitFor(() => pty.screen().includes('Codex · summaryfixture'), 'Summary fixture project did not load');
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'notification'), false);
+  pty.send('\x1b[200~/dispatch Inspect the synthetic summary\x1b[201~'); await delay(50); pty.send('\r');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 1, 'Summary task was not submitted');
+  await waitFor(() => hasStartedNotice(pty), 'Task outcome did not render');
+  await waitFor(() => pty.screen().includes('Working'), 'The app did not observe the task working before completion');
+  assert.equal((await fixture.calls()).some(({ args }) => args[0] === 'notification'), false, 'Submission must not be reported as completion');
+  await repo.write('README.md', 'Synthetic fixture changed.\nSecond line.\n');
+  await fixture.setState(done => {
+    done.snapshot.agents.find(agent => agent.terminal_id === 'fixture-terminal-9').agent_status = 'done';
+    return done;
+  });
+  await waitFor(async () => (await fixture.calls()).some(({ args }) => args[0] === 'notification' && args[1] === 'show'), 'Actual task outcome/snapshot wiring did not notify completion');
+  const notified = (await fixture.calls()).filter(({ args }) => args[0] === 'notification');
+  assert.equal(notified.length, 1);
+  assert.ok(notified[0].args.some(value => value.includes('summaryfixture') && value.includes('finished')));
+  pty.send('d');
+  await waitFor(() => pty.frames().some(frame => /\+2\s+−1/.test(frame) && frame.includes('1 files')), 'Done task did not show the real tracked Git change counts');
+  await delay(2200);
+  assert.equal((await fixture.calls()).filter(({ args }) => args[0] === 'notification').length, 1, 'Repeated done snapshots must not duplicate alerts');
+  const detail = pty.screen();
+  for (const deferred of ['Remove worktree', 'Force remove', 'Follow-up', 'Re-run', 'Named profile']) assert.equal(detail.includes(deferred), false);
+  pty.send('\x1b'); await delay(80);
+  for (const command of ['/test codex: later', '/dispatch codex.fast: later', '/dispatch claude,codex: later']) {
+    pty.send('\x1b[200~' + command + '\x1b[201~'); await delay(50); pty.send('\r');
+    await waitFor(() => /not enabled|supports \/dispatch only/.test(pty.screen()), 'Deferred syntax did not explain checkpoint scope before launch: ' + command + '\n' + pty.screen());
+    assert.equal((await fixture.calls()).filter(({ args }) => args[1] === 'start').length, 1);
+    pty.send('\x1b'); await delay(50);
+  }
+  // The former +wt refusal case remains covered with its newly authorized
+  // behavior; other deferred forms above still cannot start another agent.
+  const checkout = join(fixture.directory, 'explicit-checkout');
+  await mkdir(checkout);
+  const scenario = JSON.parse(await readFile(fixture.scenarioPath, 'utf8'));
+  Object.assign(scenario, { worktreePath: checkout, worktreeSource: { repo_key: repo.commonDir, repo_name: 'summaryfixture', repo_root: repo.root,
+    source_checkout_path: repo.root, source_workspace_id: 'w1' } });
+  await atomicJson(fixture.scenarioPath, scenario);
+  pty.send('\x1b[200~/dispatch codex+wt: later\x1b[201~'); await delay(50); pty.send('\r');
+  await waitFor(async () => (await fixture.calls()).filter(({ args }) => args[1] === 'prompt').length === 2, 'Explicit +wt did not submit its original literal task');
+  const worktreeCalls = await fixture.calls();
+  const worktree = worktreeCalls.filter(({ args }) => args[0] === 'worktree' && args[1] === 'create');
+  assert.equal(worktree.length, 1);
+  assert.equal(worktree[0].args[worktree[0].args.indexOf('--cwd') + 1], repo.root);
+  assert.equal(worktree[0].args.includes('--trust-repository'), false);
+  assert.equal(worktreeCalls.filter(({ args }) => args[1] === 'start').length, 2);
+  assert.equal(worktreeCalls.filter(({ args }) => args[1] === 'prompt')[1].args[3], 'later');
+  assert.equal(worktreeCalls.some(({ args }) => args[1] === 'close' || args[1] === 'remove'), false);
+  pty.send('q');
+  assert.equal((await waitFor(() => pty.exited(), 'Summary app did not quit')).rawRestored, true);
+  await assert.rejects(readFile(fixture.historyPath), { code: 'ENOENT' });
+});
+
+test('checkpoint QA: malformed config explains the problem at minimum size and defaults still dispatch safely', { timeout: 30000 }, async t => {
+  const fixture = await transportFixture();
+  const malformed = '{ fixture-invalid-json';
+  await writeFile(fixture.configPath, malformed);
+  const pty = await startInstalledPty(t, fixture, { columns: 40, rows: 15 });
+  await waitFor(() => pty.frames().some(frame => frame.includes('valid JSON')), 'Malformed-config notice must show the problem, not only its long filename: ' + pty.screen(), 3000);
+  await waitFor(() => pty.screen().includes('Default: Codex') && !pty.screen().includes('Projects loading'), 'Default discovery did not complete')
+    .catch(error => { error.message += '\n' + pty.screen(); throw error; });
+  pty.send('\x1b[200~/dispatch codex@unregistered-project: Never launch this\x1b[201~');
+  await waitFor(() => pty.screen().includes('Never launch this'), 'Unknown-project command input was not rendered');
+  pty.send('\r');
+  await waitFor(() => pty.screen().includes('Unknown project'), 'Unknown project was not explained');
+  assert.equal((await fixture.calls()).some(({ args }) => ['create', 'start', 'prompt'].includes(args[1])), false);
+  pty.send('\x1b');
+  await waitFor(() => pty.screen().includes('/ dispatch · ↑↓'), 'Escape did not return to the compact board');
+  pty.send('\x1b[200~/DISPATCH CoDeX: Defaults remain usable\x1b[201~'); await delay(50); pty.send('\r');
+  await waitFor(async () => (await fixture.calls()).some(({ args }) => args[1] === 'prompt'), 'Invalid config did not fall back to usable safe defaults');
+  const calls = await fixture.calls();
+  assert.equal(calls.filter(({ args }) => args[0] === 'tab' && args[1] === 'create').length, 1);
+  assert.equal(calls.find(({ args }) => args[1] === 'prompt').args[3], 'Defaults remain usable');
+  assert.equal(await readFile(fixture.configPath, 'utf8'), malformed, 'Invalid config must not be overwritten');
+  await assert.rejects(readFile(fixture.historyPath), { code: 'ENOENT' });
+  pty.send('\x03');
+  assert.equal((await waitFor(() => pty.exited(), 'Config acceptance did not quit')).rawRestored, true);
 });
